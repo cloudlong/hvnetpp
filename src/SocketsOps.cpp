@@ -146,17 +146,20 @@ void shutdownWrite(int sockfd) {
 }
 
 void toIpPort(char* buf, size_t size, const struct sockaddr* addr) {
-    toIp(buf, size, addr);
-    size_t end = ::strlen(buf);
+    char ip[INET6_ADDRSTRLEN] = "";
+    toIp(ip, sizeof ip, addr);
     uint16_t port = 0;
     if (addr->sa_family == AF_INET) {
         const struct sockaddr_in* addr4 = sockaddr_in_cast(addr);
         port = ntohs(addr4->sin_port);
+        snprintf(buf, size, "%s:%u", ip, port);
     } else if (addr->sa_family == AF_INET6) {
         const struct sockaddr_in6* addr6 = sockaddr_in6_cast(addr);
         port = ntohs(addr6->sin6_port);
+        snprintf(buf, size, "[%s]:%u", ip, port);
+    } else if (size > 0) {
+        buf[0] = '\0';
     }
-    snprintf(buf + end, size - end, ":%u", port);
 }
 
 void toIp(char* buf, size_t size, const struct sockaddr* addr) {
@@ -174,7 +177,10 @@ void toIp(char* buf, size_t size, const struct sockaddr* addr) {
 void fromIpPort(const char* ip, uint16_t port, struct sockaddr_in* addr) {
     addr->sin_family = AF_INET;
     addr->sin_port = htons(port);
-    if (::inet_pton(AF_INET, ip, &addr->sin_addr) <= 0) {
+    int ret = ::inet_pton(AF_INET, ip, &addr->sin_addr);
+    if (ret == 0) {
+        RTCLOG(RTC_ERROR, "sockets::fromIpPort invalid IPv4 address: %s", ip);
+    } else if (ret < 0) {
         RTCLOG(RTC_ERROR, "sockets::fromIpPort error: %s", strerror(errno));
     }
 }
@@ -182,7 +188,10 @@ void fromIpPort(const char* ip, uint16_t port, struct sockaddr_in* addr) {
 void fromIpPort(const char* ip, uint16_t port, struct sockaddr_in6* addr) {
     addr->sin6_family = AF_INET6;
     addr->sin6_port = htons(port);
-    if (::inet_pton(AF_INET6, ip, &addr->sin6_addr) <= 0) {
+    int ret = ::inet_pton(AF_INET6, ip, &addr->sin6_addr);
+    if (ret == 0) {
+        RTCLOG(RTC_ERROR, "sockets::fromIpPort invalid IPv6 address: %s", ip);
+    } else if (ret < 0) {
         RTCLOG(RTC_ERROR, "sockets::fromIpPort error: %s", strerror(errno));
     }
 }

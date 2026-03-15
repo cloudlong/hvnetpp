@@ -80,7 +80,6 @@ EventLoop::~EventLoop() {
 void EventLoop::loop() {
     assertInLoopThread();
     looping_ = true;
-    quit_ = false;
     RTCLOG(RTC_TRACE, "EventLoop %p start looping", this);
 
     while (!quit_) {

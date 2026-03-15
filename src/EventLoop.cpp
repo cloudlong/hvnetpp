@@ -5,6 +5,7 @@
 #include "rtclog.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <signal.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
@@ -57,8 +58,12 @@ EventLoop::EventLoop()
     RTCLOG(RTC_DEBUG, "EventLoop created %p in thread %d", this, tid_);
     if (t_loopInThisThread) {
         RTCLOG(RTC_FATAL, "Another EventLoop %p exists in this thread %d", t_loopInThisThread, tid_);
+        std::abort();
     } else {
         t_loopInThisThread = this;
+    }
+    if (!pendingQueue_->isValid()) {
+        RTCLOG(RTC_WARN, "EventLoop pending MPSC queue unavailable, falling back to mutex queue");
     }
     wakeupChannel_->setReadCallback(std::bind(&EventLoop::handleRead, this));
     wakeupChannel_->enableReading();
@@ -100,8 +105,7 @@ void EventLoop::loop() {
 void EventLoop::quit() {
     quit_ = true;
     if (!isInLoopThread()) {
-        uint64_t one = 1;
-        ssize_t n = ::write(wakeupFd_, &one, sizeof one);
+        wakeup();
     }
 }
 
@@ -131,6 +135,15 @@ bool EventLoop::hasChannel(Channel* channel) {
 void EventLoop::assertInLoopThread() {
     if (!isInLoopThread()) {
         RTCLOG(RTC_FATAL, "EventLoop::assertInLoopThread - Created in thread %d current thread %d", tid_, gettid_());
+        std::abort();
+    }
+}
+
+void EventLoop::wakeup() {
+    uint64_t one = 1;
+    ssize_t n = ::write(wakeupFd_, &one, sizeof one);
+    if (n != sizeof one) {
+        RTCLOG(RTC_ERROR, "EventLoop::wakeup() writes %zd bytes instead of 8", n);
     }
 }
 
@@ -144,20 +157,31 @@ void EventLoop::handleRead() {
 
 void EventLoop::doPendingFunctors() {
     callingPendingFunctors_ = true;
-    
-    while (true) {
-        PendingQueue::Node* node = pendingQueue_->peek();
-        if (!node) {
-            break;
+
+    if (pendingQueue_->isValid()) {
+        while (true) {
+            PendingQueue::Node* node = pendingQueue_->peek();
+            if (!node) {
+                break;
+            }
+
+            FunctorTask& task = node->data;
+            if (task.functorPtr) {
+                (*task.functorPtr)();
+                delete task.functorPtr;
+            }
+
+            pendingQueue_->consume(node);
         }
-        
-        FunctorTask& task = node->data;
-        if (task.functorPtr) {
-            (*task.functorPtr)();
-            delete task.functorPtr;
-        }
-        
-        pendingQueue_->consume(node);
+    }
+
+    std::vector<Functor> pendingFunctors;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pendingFunctors.swap(pendingFunctors_);
+    }
+    for (Functor& functor : pendingFunctors) {
+        functor();
     }
 
     callingPendingFunctors_ = false;
@@ -182,19 +206,21 @@ void EventLoop::cancel(TimerId timerId) {
 }
 
 void EventLoop::queueInLoop(Functor cb) {
-    Functor* f = new Functor(std::move(cb));
-    PendingQueue::Node* node = pendingQueue_->reserve();
+    PendingQueue::Node* node = nullptr;
+    if (pendingQueue_->isValid()) {
+        node = pendingQueue_->reserve();
+    }
+
     if (node) {
-        node->data.functorPtr = f;
+        node->data.functorPtr = new Functor(std::move(cb));
         pendingQueue_->commit(node, 1);
-        
-        if (!isInLoopThread() || callingPendingFunctors_) {
-            uint64_t one = 1;
-            ssize_t n = ::write(wakeupFd_, &one, sizeof one);
-        }
     } else {
-        // Queue full or error
-        delete f;
-        RTCLOG(RTC_ERROR, "queueInLoop failed: queue full");
+        std::lock_guard<std::mutex> lock(mutex_);
+        pendingFunctors_.emplace_back(std::move(cb));
+        RTCLOG(RTC_WARN, "queueInLoop lock-free queue unavailable/full, using fallback queue");
+    }
+
+    if (!isInLoopThread() || callingPendingFunctors_) {
+        wakeup();
     }
 }

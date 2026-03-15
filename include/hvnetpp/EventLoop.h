@@ -47,6 +47,7 @@ public:
     void cancel(TimerId timerId);
 
 private:
+    void wakeup();
     void handleRead(); // for wake up
     void doPendingFunctors();
 
@@ -67,8 +68,8 @@ private:
     ChannelList activeChannels_;
     Channel* currentActiveChannel_;
 
-    // std::mutex mutex_;
-    // std::vector<Functor> pendingFunctors_;
+    std::mutex mutex_;
+    std::vector<Functor> pendingFunctors_;
     struct FunctorTask {
         Functor* functorPtr;
     };

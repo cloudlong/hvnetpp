@@ -2,6 +2,7 @@
 
 #include "hvnetpp/Buffer.h"
 #include "hvnetpp/InetAddress.h"
+#include <atomic>
 #include <memory>
 #include <string>
 #include <functional>
@@ -33,7 +34,7 @@ public:
     const std::string& name() const { return name_; }
     const InetAddress& localAddress() const { return localAddr_; }
     const InetAddress& peerAddress() const { return peerAddr_; }
-    bool connected() const { return state_ == kConnected; }
+    bool connected() const { return state() == kConnected; }
 
     void send(const std::string& message);
     void send(Buffer* message);
@@ -61,11 +62,12 @@ private:
     void sendInLoop(const void* message, size_t len);
     void shutdownInLoop();
     void closeSocket();
-    void setState(StateE s) { state_ = s; }
+    StateE state() const { return state_.load(std::memory_order_acquire); }
+    void setState(StateE s) { state_.store(s, std::memory_order_release); }
 
     EventLoop* loop_;
     const std::string name_;
-    StateE state_;
+    std::atomic<StateE> state_;
     
     // We hold the fd but Channel doesn't own it.
     std::unique_ptr<Channel> channel_;

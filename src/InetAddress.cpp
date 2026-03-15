@@ -1,6 +1,7 @@
 #include "hvnetpp/InetAddress.h"
 #include "hvnetpp/SocketsOps.h"
 #include <netdb.h>
+#include <sys/socket.h>
 #include <strings.h>
 #include <cstring>
 #include <cstddef>
@@ -70,14 +71,41 @@ uint16_t InetAddress::toPort() const {
 
 bool InetAddress::resolve(std::string hostname, InetAddress* out) {
     assert(out != NULL);
-    struct hostent* hent = gethostbyname(hostname.c_str());
-    if (hent) {
-        out->addr_.sin_addr = *reinterpret_cast<struct in_addr*>(hent->h_addr);
-        return true;
-    } else {
-        // try getaddrinfo?
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = (out->family() == AF_INET || out->family() == AF_INET6) ? out->family() : AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo* result = NULL;
+    const int ret = ::getaddrinfo(hostname.c_str(), NULL, &hints, &result);
+    if (ret != 0 || result == NULL) {
         return false;
     }
+
+    bool resolved = false;
+    const uint16_t port = out->portNetEndian();
+    for (struct addrinfo* ai = result; ai != NULL; ai = ai->ai_next) {
+        if (ai->ai_family == AF_INET) {
+            const struct sockaddr_in* addr4 =
+                reinterpret_cast<const struct sockaddr_in*>(ai->ai_addr);
+            out->addr_ = *addr4;
+            out->addr_.sin_port = port;
+            resolved = true;
+            break;
+        }
+        if (ai->ai_family == AF_INET6) {
+            const struct sockaddr_in6* addr6 =
+                reinterpret_cast<const struct sockaddr_in6*>(ai->ai_addr);
+            out->addr6_ = *addr6;
+            out->addr6_.sin6_port = port;
+            resolved = true;
+            break;
+        }
+    }
+
+    ::freeaddrinfo(result);
+    return resolved;
 }
 
 } // namespace hvnetpp

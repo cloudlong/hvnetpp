@@ -28,10 +28,12 @@ public:
     int fd() const { return sockfd_; }
 
 private:
+    bool ensureSocket(sa_family_t family);
     void handleRead();
 
     EventLoop* loop_;
     const std::string name_;
+    sa_family_t family_;
     int sockfd_;
     std::unique_ptr<Channel> channel_;
     ReadCallback readCallback_;

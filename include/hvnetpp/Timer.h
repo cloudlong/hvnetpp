@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <chrono>
 
@@ -27,16 +28,16 @@ public:
 
     void restart(Timestamp now);
 
-    static int64_t numCreated() { return s_numCreated_; }
+    static int64_t numCreated() { return s_numCreated_.load(std::memory_order_relaxed); }
 
 private:
     const TimerCallback callback_;
     Timestamp expiration_;
     const double interval_;
     const bool repeat_;
-    const int64_t sequence_ = ++s_numCreated_;
+    const int64_t sequence_ = s_numCreated_.fetch_add(1, std::memory_order_relaxed) + 1;
 
-    static int64_t s_numCreated_;
+    static std::atomic<int64_t> s_numCreated_;
 };
 
 } // namespace hvnetpp

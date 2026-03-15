@@ -32,6 +32,10 @@ public:
 
     // Reserve a slot for writing
     Node* reserve() {
+        if (!buffer_ || !buffer_->isValid()) {
+            return nullptr;
+        }
+
         const uint32_t nodeSize = sizeof(Node);
         unsigned int s = buffer_->size();
         
@@ -45,22 +49,36 @@ public:
             }
 
             if (buffer_->tailAtomic().compare_exchange_weak(w, w + nodeSize)) {
-                return reinterpret_cast<Node*>(buffer_->getPointer(w));
+                unsigned char* ptr = buffer_->getPointer(w);
+                if (!ptr) {
+                    return nullptr;
+                }
+                return reinterpret_cast<Node*>(ptr);
             }
         }
     }
 
     void commit(Node* node, uint32_t id) {
+        if (!node) {
+            return;
+        }
         std::atomic_thread_fence(std::memory_order_release);
         node->id.store(id, std::memory_order_release);
     }
 
     Node* peek() {
+        if (!buffer_ || !buffer_->isValid()) {
+            return nullptr;
+        }
         if (buffer_->headAtomic().load(std::memory_order_relaxed) == buffer_->tailAtomic().load(std::memory_order_acquire)) {
             return nullptr;
         }
         
-        Node* node = reinterpret_cast<Node*>(buffer_->headPtr());
+        unsigned char* ptr = buffer_->headPtr();
+        if (!ptr) {
+            return nullptr;
+        }
+        Node* node = reinterpret_cast<Node*>(ptr);
         if (node->id.load(std::memory_order_acquire)) {
             return node;
         }
@@ -68,6 +86,9 @@ public:
     }
 
     void consume(Node* node) {
+        if (!buffer_ || !buffer_->isValid() || !node) {
+            return;
+        }
         memset(node, 0, sizeof(Node));
         std::atomic_thread_fence(std::memory_order_release);
         buffer_->headAtomic().fetch_add(sizeof(Node), std::memory_order_relaxed);

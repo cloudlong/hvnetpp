@@ -2,7 +2,7 @@
 
 namespace hvnetpp {
 
-int64_t Timer::s_numCreated_ = 0;
+std::atomic<int64_t> Timer::s_numCreated_(0);
 
 void Timer::restart(Timestamp now) {
     if (repeat_) {

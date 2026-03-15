@@ -29,14 +29,23 @@ CircularBuffer::~CircularBuffer() {
 }
 
 unsigned char* CircularBuffer::headPtr() const {
+    if (!data_) {
+        return nullptr;
+    }
     return data_ + (head_.load(std::memory_order_relaxed) & (size_ - 1));
 }
 
 unsigned char* CircularBuffer::tailPtr() const {
+    if (!data_) {
+        return nullptr;
+    }
     return data_ + (tail_.load(std::memory_order_relaxed) & (size_ - 1));
 }
 
 unsigned char* CircularBuffer::getPointer(unsigned int offset) const {
+    if (!data_) {
+        return nullptr;
+    }
     return data_ + (offset & (size_ - 1));
 }
 

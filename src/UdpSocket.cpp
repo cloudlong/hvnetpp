@@ -1,15 +1,12 @@
 #include "hvnetpp/UdpSocket.h"
 #include "hvnetpp/EventLoop.h"
 #include "hvnetpp/Channel.h"
-#include "hvnetpp/Buffer.h"
-#include "hvnetpp/SocketsOps.h"
+#include "SocketsOps.h"
 #include "rtclog.h"
 
 #include <errno.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <cstring>
+#include <sys/socket.h>
 
 namespace hvnetpp {
 
@@ -23,7 +20,7 @@ void cleanupUdpSocket(EventLoop* loop, std::shared_ptr<Channel> channel, int soc
             loop->queueInLoop([channel]() {});
         }
         if (sockfd >= 0) {
-            sockets::close(sockfd);
+            detail::sockets::close(sockfd);
         }
     };
 
@@ -33,12 +30,6 @@ void cleanupUdpSocket(EventLoop* loop, std::shared_ptr<Channel> channel, int soc
         loop->queueInLoop(std::move(cleanup));
     }
 }
-
-socklen_t socketAddrLength(const InetAddress& addr) {
-    return static_cast<socklen_t>(
-        addr.family() == AF_INET6 ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in));
-}
-
 } // namespace
 
 UdpSocket::UdpSocket(EventLoop* loop, const std::string& name)
@@ -46,6 +37,7 @@ UdpSocket::UdpSocket(EventLoop* loop, const std::string& name)
       name_(name),
       family_(AF_UNSPEC),
       sockfd_(-1),
+      state_(State::kClosed),
       channel_(),
       callbackToken_(std::make_shared<bool>(true)),
       readBuf_(65536) { // Max UDP packet size
@@ -53,10 +45,15 @@ UdpSocket::UdpSocket(EventLoop* loop, const std::string& name)
 
 UdpSocket::~UdpSocket() {
     callbackToken_.reset();
+    state_.store(State::kClosed, std::memory_order_release);
     std::shared_ptr<Channel> channel = std::move(channel_);
     const int sockfd = sockfd_;
     sockfd_ = -1;
     cleanupUdpSocket(loop_, std::move(channel), sockfd);
+}
+
+bool UdpSocket::open(sa_family_t family) {
+    return ensureSocket(family);
 }
 
 bool UdpSocket::ensureSocket(sa_family_t family) {
@@ -69,15 +66,16 @@ bool UdpSocket::ensureSocket(sa_family_t family) {
         return true;
     }
 
-    sockfd_ = sockets::createNonblockingUdp(family);
+    sockfd_ = detail::sockets::createNonblockingUdp(family);
     if (sockfd_ < 0) {
         return false;
     }
     family_ = family;
+    state_.store(State::kOpened, std::memory_order_release);
     channel_ = std::make_shared<Channel>(loop_, sockfd_);
 
-    sockets::setReuseAddr(sockfd_, true);
-    sockets::setReusePort(sockfd_, true);
+    detail::sockets::setReuseAddr(sockfd_, true);
+    detail::sockets::setReusePort(sockfd_, true);
     std::weak_ptr<bool> token = callbackToken_;
     channel_->setReadCallback([this, token]() {
         if (token.lock()) {
@@ -92,33 +90,69 @@ bool UdpSocket::bind(const InetAddress& addr) {
     if (!ensureSocket(addr.family())) {
         return false;
     }
-    if (!sockets::bind(sockfd_, addr.getSockAddr())) {
+    if (!detail::sockets::bind(sockfd_, addr)) {
         if (createdSocket) {
             std::shared_ptr<Channel> channel = std::move(channel_);
             const int sockfd = sockfd_;
             family_ = AF_UNSPEC;
             sockfd_ = -1;
+            state_.store(State::kClosed, std::memory_order_release);
             cleanupUdpSocket(loop_, std::move(channel), sockfd);
         }
         return false;
     }
+    if (state() != State::kReceiving) {
+        state_.store(State::kBound, std::memory_order_release);
+    }
+    return true;
+}
+
+bool UdpSocket::bindAndStart(const InetAddress& addr) {
+    if (!bind(addr)) {
+        return false;
+    }
+    return startReceive();
+}
+
+bool UdpSocket::startReceive() {
     std::shared_ptr<Channel> channel = channel_;
+    if (!channel || !isBound()) {
+        errno = EINVAL;
+        RTCLOG(RTC_WARN, "UdpSocket::startReceive() requires a bound socket");
+        return false;
+    }
+    if (state() == State::kReceiving) {
+        return true;
+    }
+    state_.store(State::kReceiving, std::memory_order_release);
     loop_->runInLoop([channel]() {
         channel->enableReading();
     });
     return true;
 }
 
+void UdpSocket::stopReceive() {
+    std::shared_ptr<Channel> channel = channel_;
+    if (!channel) {
+        return;
+    }
+    if (state() == State::kReceiving) {
+        state_.store(State::kBound, std::memory_order_release);
+    }
+    loop_->runInLoop([channel]() {
+        channel->disableReading();
+    });
+}
+
 ssize_t UdpSocket::sendTo(const void* data, size_t len, const InetAddress& destAddr) {
     if (!ensureSocket(destAddr.family())) {
         return -1;
     }
-    return ::sendto(sockfd_, data, len, 0, destAddr.getSockAddr(), socketAddrLength(destAddr));
+    return ::sendto(sockfd_, data, len, 0, destAddr.getSockAddr(), destAddr.length());
 }
 
-ssize_t UdpSocket::sendTo(Buffer* buf, const InetAddress& destAddr) {
-    std::string payload = buf->retrieveAllAsString();
-    return sendTo(payload.data(), payload.size(), destAddr);
+ssize_t UdpSocket::sendTo(const Buffer& buf, const InetAddress& destAddr) {
+    return sendTo(buf.peek(), buf.readableBytes(), destAddr);
 }
 
 void UdpSocket::handleRead() {
@@ -130,19 +164,8 @@ void UdpSocket::handleRead() {
     
     if (n >= 0) {
         if (readCallback_) {
-            inputBuffer_.retrieveAll();
-            inputBuffer_.append(readBuf_.data(), n);
-            if (peerAddrStorage.ss_family == AF_INET6) {
-                const struct sockaddr_in6* peerAddr =
-                    reinterpret_cast<const struct sockaddr_in6*>(&peerAddrStorage);
-                InetAddress peer(*peerAddr);
-                readCallback_(peer, &inputBuffer_);
-            } else {
-                const struct sockaddr_in* peerAddr =
-                    reinterpret_cast<const struct sockaddr_in*>(&peerAddrStorage);
-                InetAddress peer(*peerAddr);
-                readCallback_(peer, &inputBuffer_);
-            }
+            InetAddress peer(reinterpret_cast<const struct sockaddr*>(&peerAddrStorage), addrLen);
+            readCallback_(peer, readBuf_.data(), static_cast<size_t>(n));
         }
     } else {
         RTCLOG(RTC_ERROR, "UdpSocket::handleRead() error: %s", strerror(errno));

@@ -18,6 +18,10 @@ __thread EventLoop* t_loopInThisThread = nullptr;
 
 const int kPollTimeMs = 10000;
 
+TimeDelta secondsToTimeDelta(double seconds) {
+    return std::chrono::duration_cast<TimeDelta>(std::chrono::duration<double>(seconds));
+}
+
 pid_t gettid_() {
     return static_cast<pid_t>(::syscall(SYS_gettid));
 }
@@ -187,16 +191,24 @@ void EventLoop::doPendingFunctors() {
 }
 
 TimerId EventLoop::runAt(Timestamp time, TimerCallback cb) {
-    return timerQueue_->addTimer(std::move(cb), time, 0.0);
+    return timerQueue_->addTimer(std::move(cb), time, TimeDelta::zero());
 }
 
 TimerId EventLoop::runAfter(double delay, TimerCallback cb) {
-    Timestamp time(std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<int64_t>(delay * 1000)));
+    return runAfter(secondsToTimeDelta(delay), std::move(cb));
+}
+
+TimerId EventLoop::runAfter(TimeDelta delay, TimerCallback cb) {
+    Timestamp time(std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(delay));
     return runAt(time, std::move(cb));
 }
 
 TimerId EventLoop::runEvery(double interval, TimerCallback cb) {
-    Timestamp time(std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<int64_t>(interval * 1000)));
+    return runEvery(secondsToTimeDelta(interval), std::move(cb));
+}
+
+TimerId EventLoop::runEvery(TimeDelta interval, TimerCallback cb) {
+    Timestamp time(std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(interval));
     return timerQueue_->addTimer(std::move(cb), time, interval);
 }
 

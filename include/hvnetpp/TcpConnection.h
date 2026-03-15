@@ -12,7 +12,6 @@ namespace hvnetpp {
 
 class EventLoop;
 class Channel;
-class Socket; // Helper class for socket ops
 
 class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
 public:
@@ -22,7 +21,6 @@ public:
     using MessageCallback = std::function<void(const TcpConnectionPtr&, Buffer*)>;
     using WriteCompleteCallback = std::function<void(const TcpConnectionPtr&)>;
     using HighWaterMarkCallback = std::function<void(const TcpConnectionPtr&, size_t)>;
-    using CloseCallback = std::function<void(const TcpConnectionPtr&)>;
 
     TcpConnection(EventLoop* loop,
                   const std::string& name,
@@ -37,9 +35,15 @@ public:
     const InetAddress& peerAddress() const { return peerAddr_; }
     bool connected() const { return state() == kConnected; }
 
+    // Safe to call from any thread. Copies bytes into the connection send path.
     void send(const std::string& message);
-    // Transfers the readable bytes from `message` into the connection send path.
+    // Safe to call from any thread. Copies bytes into the connection send path.
+    void send(const void* data, size_t len);
+    // Safe to call from any thread. Does not mutate `message`.
+    void send(const Buffer& message);
+    // Compatibility overload. Transfers and clears the readable bytes from `message`.
     void send(Buffer* message);
+    // Safe to call from any thread. Flushes pending output before half-closing.
     void shutdown();
     void setTcpNoDelay(bool on);
 
@@ -47,15 +51,16 @@ public:
     void setMessageCallback(const MessageCallback& cb) { messageCallback_ = cb; }
     void setWriteCompleteCallback(const WriteCompleteCallback& cb) { writeCompleteCallback_ = cb; }
     void setHighWaterMarkCallback(const HighWaterMarkCallback& cb, size_t highWaterMark) { highWaterMarkCallback_ = cb; highWaterMark_ = highWaterMark; }
-    
-    // Internal use only
+
+private:
+    friend class TcpServer;
+
+    using CloseCallback = std::function<void(const TcpConnectionPtr&)>;
+    enum StateE { kDisconnected, kConnecting, kConnected, kDisconnecting };
+
     void setCloseCallback(const CloseCallback& cb) { closeCallback_ = cb; }
     void connectEstablished();
     void connectDestroyed();
-
-private:
-    enum StateE { kDisconnected, kConnecting, kConnected, kDisconnecting };
-    
     void handleRead();
     void handleWrite();
     void handleClose();

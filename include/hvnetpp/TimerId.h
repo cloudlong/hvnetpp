@@ -10,6 +10,9 @@ public:
     TimerId(Timer* timer, int64_t seq)
         : timer_(timer), sequence_(seq) {}
 
+    bool valid() const { return timer_ != nullptr; }
+    explicit operator bool() const { return valid(); }
+
     friend class TimerQueue;
 
 private:

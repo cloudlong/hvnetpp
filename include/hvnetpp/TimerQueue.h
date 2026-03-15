@@ -15,7 +15,7 @@ public:
     explicit TimerQueue(EventLoop* loop);
     ~TimerQueue();
 
-    TimerId addTimer(TimerCallback cb, Timestamp when, double interval);
+    TimerId addTimer(TimerCallback cb, Timestamp when, TimeDelta interval);
     void cancel(TimerId timerId);
 
 private:

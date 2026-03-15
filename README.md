@@ -10,7 +10,8 @@ hvnetpp is a high-performance, non-blocking network library for C++. It uses `ep
 
 - **Non-blocking I/O**: Based on the Reactor pattern using `epoll` (Linux only).
 - **TCP Support**: Easy-to-use `TcpServer` and `TcpConnection` classes for handling TCP connections.
-- **UDP Support**: wrappers for UDP socket operations.
+- **UDP Support**: explicit `UdpSocket` lifecycle for bind/send/receive.
+- **Address Utilities**: `InetAddress` as a concrete endpoint value type plus a separate `Resolver` for DNS.
 - **Timers**: Efficient timer management via `TimerQueue`.
 - **Callbacks**: Modern C++11 callbacks (`std::function`) for connection establishment, message reception, and write completion.
 - **Logging**: Integrated logging via `rtclog`.
@@ -89,10 +90,79 @@ int main() {
 }
 ```
 
+## Address And DNS
+
+`InetAddress` is the public endpoint value type. It stores one concrete `sockaddr` and is responsible for parse/format helpers such as `toIp()` and `toIpPort()`.
+
+Hostname resolution lives in `Resolver` instead of `InetAddress`:
+
+```cpp
+#include "hvnetpp/Resolver.h"
+#include <sys/socket.h>
+
+hvnetpp::InetAddress addr;
+int resolveError = 0;
+if (hvnetpp::Resolver::resolve("localhost", &addr, 8080, AF_UNSPEC, SOCK_STREAM, &resolveError)) {
+    // addr now contains one resolved endpoint
+} else {
+    RTCLOG(RTC_ERROR, "resolve failed: %s", hvnetpp::Resolver::errorString(resolveError));
+}
+```
+
+`SocketsOps` is now an internal implementation detail under `src/` and is no longer part of the public include surface.
+
+For raw IP literals, prefer `InetAddress::tryParse(...)` when the input comes from users or config files.
+
+## UDP Lifecycle
+
+`UdpSocket` now uses a more explicit lifecycle:
+
+```cpp
+hvnetpp::UdpSocket udp(&loop, "echo-udp");
+udp.setReadCallback([](const hvnetpp::InetAddress& peer, const void* data, size_t len) {
+    // `data` is owned by the socket and is only valid during the callback
+});
+
+if (udp.bindAndStart(hvnetpp::InetAddress::any(9000))) {
+    // receiving is now active
+}
+```
+
+`bind()` no longer starts read interest implicitly, `startReceive()` now reports failure instead of silently doing nothing on an unbound socket, and `sendTo(const Buffer&)` does not mutate the caller's buffer. For sender-only sockets, `sendTo(...)` still lazily opens the underlying UDP fd.
+
+## TCP Sending And Start State
+
+`TcpConnection::send(const std::string&)`, `send(const void*, size_t)`, and `send(const Buffer&)` copy bytes into the send path and do not mutate caller-owned memory. The legacy `send(Buffer*)` overload is still available as a transfer-style compatibility API and clears the readable bytes from the buffer.
+
+`TcpServer::start()` now returns a state value:
+
+- `kListening`: the socket is already listening now
+- `kStarting`: the start request was queued to the loop thread
+- `kIdle`: an immediate start attempt failed and the server stayed idle
+
+## Timer API
+
+The timer API accepts both the legacy `double` seconds form and `std::chrono` durations. New code can use the chrono overloads directly:
+
+```cpp
+using namespace std::chrono;
+
+loop.runAfter(2500ms, []() {
+    RTCLOG(RTC_INFO, "fires once after 2.5 seconds");
+});
+
+hvnetpp::TimerId id = loop.runEvery(1s, []() {
+    RTCLOG(RTC_INFO, "fires every second");
+});
+
+if (id) {
+    loop.cancel(id);
+}
+```
+
 ## Directory Structure
 
 - `include/hvnetpp/`: Public header files.
 - `src/`: Source code implementation.
-  - `internal/`: Internal helpers (e.g., CircularBuffer).
   - `thirdparty/`: Third-party libraries (e.g., rtclog).
 - `test_build.cpp`: Example usage file.

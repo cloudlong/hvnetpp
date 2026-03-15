@@ -1,8 +1,8 @@
 #include "hvnetpp/TcpServer.h"
 #include "hvnetpp/EventLoop.h"
 #include "hvnetpp/Channel.h"
-#include "hvnetpp/SocketsOps.h"
 #include "hvnetpp/InetAddress.h"
+#include "SocketsOps.h"
 #include "rtclog.h"
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -25,10 +25,10 @@ void cleanupAcceptor(EventLoop* loop, std::shared_ptr<Channel> channel, int acce
             loop->queueInLoop([channel]() {});
         }
         if (acceptSocket >= 0) {
-            ::close(acceptSocket);
+            detail::sockets::close(acceptSocket);
         }
         if (idleFd >= 0) {
-            ::close(idleFd);
+            detail::sockets::close(idleFd);
         }
     };
 
@@ -73,26 +73,26 @@ public:
         cleanupAcceptor(loop_, std::move(acceptChannel), acceptSocket, idleFd);
     }
 
-    void listen() {
+    bool listen() {
         loop_->assertInLoopThread();
         if (listening_) {
-            return;
+            return true;
         }
 
-        const int sockfd = sockets::createNonblocking(listenAddr_.family());
+        const int sockfd = detail::sockets::createNonblocking(listenAddr_.family());
         if (sockfd < 0) {
-            return;
+            return false;
         }
 
-        sockets::setReuseAddr(sockfd, true);
-        sockets::setReusePort(sockfd, reuseport_);
-        if (!sockets::bind(sockfd, listenAddr_.getSockAddr())) {
-            sockets::close(sockfd);
-            return;
+        detail::sockets::setReuseAddr(sockfd, true);
+        detail::sockets::setReusePort(sockfd, reuseport_);
+        if (!detail::sockets::bind(sockfd, listenAddr_)) {
+            detail::sockets::close(sockfd);
+            return false;
         }
-        if (!sockets::listen(sockfd)) {
-            sockets::close(sockfd);
-            return;
+        if (!detail::sockets::listen(sockfd)) {
+            detail::sockets::close(sockfd);
+            return false;
         }
 
         acceptSocket_ = sockfd;
@@ -101,6 +101,7 @@ public:
         acceptChannel_->tie(shared_from_this());
         acceptChannel_->enableReading();
         listening_ = true;
+        return true;
     }
 
     void setNewConnectionCallback(const NewConnectionCallback& cb) {
@@ -111,14 +112,15 @@ private:
     void handleRead() {
         loop_->assertInLoopThread();
         while (true) {
-            struct sockaddr_in6 peerAddr;
-            int connfd = sockets::accept(acceptSocket_, &peerAddr);
+            struct sockaddr_storage peerAddr;
+            socklen_t peerAddrLen = sizeof peerAddr;
+            int connfd = detail::sockets::accept(acceptSocket_, &peerAddr, &peerAddrLen);
             if (connfd >= 0) {
                 if (newConnectionCallback_) {
-                    InetAddress peer(peerAddr);
+                    InetAddress peer(reinterpret_cast<const struct sockaddr*>(&peerAddr), peerAddrLen);
                     newConnectionCallback_(connfd, peer);
                 } else {
-                    sockets::close(connfd);
+                    detail::sockets::close(connfd);
                 }
                 continue;
             }
@@ -156,19 +158,21 @@ TcpServer::TcpServer(EventLoop* loop, const InetAddress& listenAddr, const std::
       name_(nameArg),
       acceptor_(std::make_shared<Acceptor>(loop, listenAddr, true)),
       callbackToken_(std::make_shared<bool>(true)),
+      state_(State::kIdle),
       nextConnId_(1) {
     std::weak_ptr<bool> token = callbackToken_;
     acceptor_->setNewConnectionCallback([this, token](int sockfd, const InetAddress& peerAddr) {
         if (token.lock()) {
             newConnection(sockfd, peerAddr);
         } else {
-            sockets::close(sockfd);
+            detail::sockets::close(sockfd);
         }
     });
 }
 
 TcpServer::~TcpServer() {
     callbackToken_.reset();
+    state_.store(State::kIdle, std::memory_order_release);
 
     ConnectionMap connections = std::move(connections_);
     acceptor_.reset();
@@ -184,14 +188,28 @@ TcpServer::~TcpServer() {
     }
 }
 
-void TcpServer::start() {
+TcpServer::State TcpServer::start() {
+    const State current = state();
+    if (current != State::kIdle) {
+        return current;
+    }
+
     std::shared_ptr<Acceptor> acceptor = acceptor_;
     std::weak_ptr<bool> token = callbackToken_;
-    loop_->runInLoop([acceptor, token]() {
+    state_.store(State::kStarting, std::memory_order_release);
+    if (loop_->isInLoopThread()) {
+        const bool ok = acceptor && acceptor->listen();
+        state_.store(ok ? State::kListening : State::kIdle, std::memory_order_release);
+        return state();
+    }
+
+    loop_->queueInLoop([this, acceptor, token]() {
         if (token.lock()) {
-            acceptor->listen();
+            const bool ok = acceptor && acceptor->listen();
+            state_.store(ok ? State::kListening : State::kIdle, std::memory_order_release);
         }
     });
+    return State::kStarting;
 }
 
 void TcpServer::newConnection(int sockfd, const InetAddress& peerAddr) {
@@ -201,8 +219,7 @@ void TcpServer::newConnection(int sockfd, const InetAddress& peerAddr) {
     ++nextConnId_;
     std::string connName = name_ + buf;
 
-    struct sockaddr_in6 local = sockets::getLocalAddr(sockfd);
-    InetAddress localAddr(local);
+    InetAddress localAddr = detail::sockets::getLocalAddr(sockfd);
 
     TcpConnectionPtr conn(new TcpConnection(loop_, connName, sockfd, localAddr, peerAddr));
     connections_[connName] = conn;

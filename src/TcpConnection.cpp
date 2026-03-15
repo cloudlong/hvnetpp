@@ -1,7 +1,7 @@
 #include "hvnetpp/TcpConnection.h"
 #include "hvnetpp/Channel.h"
 #include "hvnetpp/EventLoop.h"
-#include "hvnetpp/SocketsOps.h"
+#include "SocketsOps.h"
 #include "rtclog.h"
 #include <cerrno>
 #include <cstring>
@@ -118,7 +118,7 @@ void TcpConnection::handleClose() {
 }
 
 void TcpConnection::handleError() {
-    int err = sockets::getSocketError(channel_->fd());
+    int err = detail::sockets::getSocketError(channel_->fd());
     if (err != 0) {
         handleError(err);
     }
@@ -135,11 +135,19 @@ void TcpConnection::handleError(int err) {
 }
 
 void TcpConnection::send(const std::string& message) {
+    send(message.data(), message.size());
+}
+
+void TcpConnection::send(const void* data, size_t len) {
+    if (data == nullptr || len == 0) {
+        return;
+    }
     if (loop_->isInLoopThread()) {
         if (state() == kConnected) {
-            sendInLoop(message);
+            sendInLoop(data, len);
         }
     } else if (state() == kConnected) {
+        std::string message(static_cast<const char*>(data), len);
         TcpConnectionPtr self(shared_from_this());
         loop_->queueInLoop([self, message]() {
             if (self->state() == kConnected) {
@@ -149,7 +157,14 @@ void TcpConnection::send(const std::string& message) {
     }
 }
 
+void TcpConnection::send(const Buffer& buf) {
+    send(buf.peek(), buf.readableBytes());
+}
+
 void TcpConnection::send(Buffer* buf) {
+    if (buf == nullptr) {
+        return;
+    }
     if (loop_->isInLoopThread()) {
         if (state() == kConnected) {
             sendInLoop(buf->peek(), buf->readableBytes());
@@ -233,19 +248,19 @@ void TcpConnection::shutdown() {
 void TcpConnection::shutdownInLoop() {
     loop_->assertInLoopThread();
     if (socketFd_ >= 0 && !channel_->isWriting()) {
-        sockets::shutdownWrite(socketFd_);
+        detail::sockets::shutdownWrite(socketFd_);
     }
 }
 
 void TcpConnection::setTcpNoDelay(bool on) {
     if (socketFd_ >= 0) {
-        sockets::setTcpNoDelay(socketFd_, on);
+        detail::sockets::setTcpNoDelay(socketFd_, on);
     }
 }
 
 void TcpConnection::closeSocket() {
     if (socketFd_ >= 0) {
-        sockets::close(socketFd_);
+        detail::sockets::close(socketFd_);
         socketFd_ = -1;
     }
 }

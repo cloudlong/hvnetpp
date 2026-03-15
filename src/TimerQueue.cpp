@@ -74,7 +74,7 @@ TimerQueue::~TimerQueue() {
     }
 }
 
-TimerId TimerQueue::addTimer(TimerCallback cb, Timestamp when, double interval) {
+TimerId TimerQueue::addTimer(TimerCallback cb, Timestamp when, TimeDelta interval) {
     Timer* timer = new Timer(std::move(cb), when, interval);
     loop_->runInLoop(std::bind(&TimerQueue::addTimerInLoop, this, timer));
     return TimerId(timer, timer->sequence());

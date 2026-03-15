@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <assert.h>
+#include <cerrno>
 #include <cstdio>
 
 namespace hvnetpp {
@@ -53,23 +54,30 @@ public:
 private:
     void handleRead() {
         loop_->assertInLoopThread();
-        struct sockaddr_in6 peerAddr;
-        int connfd = sockets::accept(acceptSocket_, &peerAddr);
-        if (connfd >= 0) {
-            if (newConnectionCallback_) {
-                InetAddress peer(peerAddr);
-                newConnectionCallback_(connfd, peer);
-            } else {
-                sockets::close(connfd);
+        while (true) {
+            struct sockaddr_in6 peerAddr;
+            int connfd = sockets::accept(acceptSocket_, &peerAddr);
+            if (connfd >= 0) {
+                if (newConnectionCallback_) {
+                    InetAddress peer(peerAddr);
+                    newConnectionCallback_(connfd, peer);
+                } else {
+                    sockets::close(connfd);
+                }
+                continue;
             }
-        } else {
-            // log error
+
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
+
             if (errno == EMFILE) {
                 ::close(idleFd_);
                 idleFd_ = ::accept(acceptSocket_, NULL, NULL);
                 ::close(idleFd_);
                 idleFd_ = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
             }
+            break;
         }
     }
 

@@ -86,7 +86,6 @@ int accept(int sockfd, struct sockaddr_in6* addr) {
                            &addrlen, SOCK_NONBLOCK | SOCK_CLOEXEC);
     if (connfd < 0) {
         int savedErrno = errno;
-        RTCLOG(RTC_ERROR, "Socket::accept error: %s", strerror(savedErrno));
         switch (savedErrno) {
             case EAGAIN:
             case ECONNABORTED:
@@ -106,9 +105,11 @@ int accept(int sockfd, struct sockaddr_in6* addr) {
             case ENOTSOCK:
             case EOPNOTSUPP:
                 // unexpected errors
+                RTCLOG(RTC_ERROR, "Socket::accept error: %s", strerror(savedErrno));
                 RTCLOG(RTC_FATAL, "unexpected error of ::accept %d", savedErrno);
                 break;
             default:
+                RTCLOG(RTC_ERROR, "Socket::accept error: %s", strerror(savedErrno));
                 RTCLOG(RTC_FATAL, "unknown error of ::accept %d", savedErrno);
                 break;
         }

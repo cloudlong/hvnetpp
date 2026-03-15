@@ -69,12 +69,12 @@ uint16_t InetAddress::toPort() const {
     return ntohs(portNetEndian());
 }
 
-bool InetAddress::resolve(std::string hostname, InetAddress* out) {
+bool InetAddress::resolve(std::string hostname, InetAddress* out, uint16_t port, sa_family_t family) {
     assert(out != NULL);
 
     struct addrinfo hints;
     memset(&hints, 0, sizeof hints);
-    hints.ai_family = (out->family() == AF_INET || out->family() == AF_INET6) ? out->family() : AF_UNSPEC;
+    hints.ai_family = (family == AF_INET || family == AF_INET6) ? family : AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
     struct addrinfo* result = NULL;
@@ -84,13 +84,13 @@ bool InetAddress::resolve(std::string hostname, InetAddress* out) {
     }
 
     bool resolved = false;
-    const uint16_t port = out->portNetEndian();
+    const uint16_t portNetEndian = htons(port);
     for (struct addrinfo* ai = result; ai != NULL; ai = ai->ai_next) {
         if (ai->ai_family == AF_INET) {
             const struct sockaddr_in* addr4 =
                 reinterpret_cast<const struct sockaddr_in*>(ai->ai_addr);
             out->addr_ = *addr4;
-            out->addr_.sin_port = port;
+            out->addr_.sin_port = portNetEndian;
             resolved = true;
             break;
         }
@@ -98,7 +98,7 @@ bool InetAddress::resolve(std::string hostname, InetAddress* out) {
             const struct sockaddr_in6* addr6 =
                 reinterpret_cast<const struct sockaddr_in6*>(ai->ai_addr);
             out->addr6_ = *addr6;
-            out->addr6_.sin6_port = port;
+            out->addr6_.sin6_port = portNetEndian;
             resolved = true;
             break;
         }

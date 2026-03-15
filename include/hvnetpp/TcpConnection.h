@@ -18,6 +18,7 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
 public:
     using TcpConnectionPtr = std::shared_ptr<TcpConnection>;
     using ConnectionCallback = std::function<void(const TcpConnectionPtr&)>;
+    // Runs on the owning loop thread. The buffer is connection-owned and callbacks should retrieve bytes they consume.
     using MessageCallback = std::function<void(const TcpConnectionPtr&, Buffer*)>;
     using WriteCompleteCallback = std::function<void(const TcpConnectionPtr&)>;
     using HighWaterMarkCallback = std::function<void(const TcpConnectionPtr&, size_t)>;
@@ -37,6 +38,7 @@ public:
     bool connected() const { return state() == kConnected; }
 
     void send(const std::string& message);
+    // Transfers the readable bytes from `message` into the connection send path.
     void send(Buffer* message);
     void shutdown();
     void setTcpNoDelay(bool on);

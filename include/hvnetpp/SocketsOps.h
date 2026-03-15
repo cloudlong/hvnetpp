@@ -6,6 +6,13 @@
 namespace hvnetpp {
 namespace sockets {
 
+// Non-fatal helpers. They log and preserve errno-style failure reporting.
+int createNonblocking(sa_family_t family);
+int createNonblockingUdp(sa_family_t family);
+bool bind(int sockfd, const struct sockaddr* addr);
+bool listen(int sockfd);
+
+// Fatal convenience wrappers kept for low-level callers that explicitly want fail-fast behavior.
 int createNonblockingOrDie(sa_family_t family);
 int createNonblockingUdpOrDie(sa_family_t family);
 int connect(int sockfd, const struct sockaddr* addr);

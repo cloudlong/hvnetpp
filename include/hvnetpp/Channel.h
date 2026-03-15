@@ -6,6 +6,7 @@
 namespace hvnetpp {
 
 class EventLoop;
+class Poller;
 
 class Channel {
 public:
@@ -23,8 +24,6 @@ public:
     void setErrorCallback(EventCallback cb) { errorCallback_ = std::move(cb); }
 
     int fd() const { return fd_; }
-    int events() const { return events_; }
-    void set_revents(int revt) { revents_ = revt; }
     bool isNoneEvent() const { return events_ == kNoneEvent; }
 
     void enableReading() { events_ |= kReadEvent; update(); }
@@ -35,16 +34,18 @@ public:
     bool isWriting() const { return events_ & kWriteEvent; }
     bool isReading() const { return events_ & kReadEvent; }
 
-    // For Poller
-    int index() { return index_; }
-    void set_index(int idx) { index_ = idx; }
-
     EventLoop* ownerLoop() { return loop_; }
     void remove();
 
 private:
+    friend class Poller;
+
     void handleEventWithGuard();
     void update();
+    int events() const { return events_; }
+    void setRevents(int revt) { revents_ = revt; }
+    int index() const { return index_; }
+    void setIndex(int idx) { index_ = idx; }
 
     static const int kNoneEvent;
     static const int kReadEvent;

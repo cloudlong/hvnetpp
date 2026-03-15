@@ -45,7 +45,7 @@ void Poller::poll(int timeoutMs, ChannelList* activeChannels) {
 void Poller::fillActiveChannels(int numEvents, ChannelList* activeChannels) const {
     for (int i = 0; i < numEvents; ++i) {
         Channel* channel = static_cast<Channel*>(events_[i].data.ptr);
-        channel->set_revents(events_[i].events);
+        channel->setRevents(events_[i].events);
         activeChannels->push_back(channel);
     }
 }
@@ -57,13 +57,13 @@ void Poller::updateChannel(Channel* channel) {
             return;
         }
         update(EPOLL_CTL_ADD, channel);
-        channel->set_index(1);
+        channel->setIndex(1);
         channels_[channel->fd()] = channel;
     } else {
         // update existing one
         if (channel->isNoneEvent()) {
             update(EPOLL_CTL_DEL, channel);
-            channel->set_index(2); // deleted
+            channel->setIndex(2); // deleted
         } else {
             update(EPOLL_CTL_MOD, channel);
         }
@@ -83,7 +83,7 @@ void Poller::removeChannel(Channel* channel) {
     if (index == 1) {
         update(EPOLL_CTL_DEL, channel);
     }
-    channel->set_index(-1);
+    channel->setIndex(-1);
 }
 
 void Poller::update(int operation, Channel* channel) {

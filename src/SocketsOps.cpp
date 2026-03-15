@@ -46,8 +46,24 @@ const struct sockaddr_in6* sockaddr_in6_cast(const struct sockaddr* addr) {
     return static_cast<const struct sockaddr_in6*>(static_cast<const void*>(addr));
 }
 
-int createNonblockingOrDie(sa_family_t family) {
+int createNonblocking(sa_family_t family) {
     int sockfd = ::socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
+    if (sockfd < 0) {
+        RTCLOG(RTC_ERROR, "sockets::createNonblocking error: %s", strerror(errno));
+    }
+    return sockfd;
+}
+
+int createNonblockingUdp(sa_family_t family) {
+    int sockfd = ::socket(family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_UDP);
+    if (sockfd < 0) {
+        RTCLOG(RTC_ERROR, "sockets::createNonblockingUdp error: %s", strerror(errno));
+    }
+    return sockfd;
+}
+
+int createNonblockingOrDie(sa_family_t family) {
+    int sockfd = createNonblocking(family);
     if (sockfd < 0) {
         RTCLOG(RTC_FATAL, "sockets::createNonblockingOrDie");
         abort();
@@ -56,7 +72,7 @@ int createNonblockingOrDie(sa_family_t family) {
 }
 
 int createNonblockingUdpOrDie(sa_family_t family) {
-    int sockfd = ::socket(family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_UDP);
+    int sockfd = createNonblockingUdp(family);
     if (sockfd < 0) {
         RTCLOG(RTC_FATAL, "sockets::createNonblockingUdpOrDie");
         abort();
@@ -64,17 +80,33 @@ int createNonblockingUdpOrDie(sa_family_t family) {
     return sockfd;
 }
 
-void bindOrDie(int sockfd, const struct sockaddr* addr) {
+bool bind(int sockfd, const struct sockaddr* addr) {
     int ret = ::bind(sockfd, addr, sockaddrLength(addr));
     if (ret < 0) {
+        RTCLOG(RTC_ERROR, "sockets::bind error: %s", strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+void bindOrDie(int sockfd, const struct sockaddr* addr) {
+    if (!bind(sockfd, addr)) {
         RTCLOG(RTC_FATAL, "sockets::bindOrDie");
         abort();
     }
 }
 
-void listenOrDie(int sockfd) {
+bool listen(int sockfd) {
     int ret = ::listen(sockfd, SOMAXCONN);
     if (ret < 0) {
+        RTCLOG(RTC_ERROR, "sockets::listen error: %s", strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+void listenOrDie(int sockfd) {
+    if (!listen(sockfd)) {
         RTCLOG(RTC_FATAL, "sockets::listenOrDie");
         abort();
     }

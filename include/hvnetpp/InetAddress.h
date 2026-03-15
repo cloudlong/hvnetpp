@@ -13,8 +13,8 @@ public:
     // Mostly used in TcpServer listening.
     explicit InetAddress(uint16_t port = 0, bool loopbackOnly = false, bool ipv6 = false);
 
-    // Constructs an endpoint with given ip and port.
-    // @c ip should be "1.2.3.4"
+    // Constructs an endpoint with given IP literal and port.
+    // `ipv6` selects whether `ip` is parsed as IPv4 or IPv6 text.
     InetAddress(std::string ip, uint16_t port, bool ipv6 = false);
 
     // Constructs an endpoint with given struct @c sockaddr_in
@@ -36,10 +36,9 @@ public:
     uint32_t ipNetEndian() const;
     uint16_t portNetEndian() const { return addr_.sin_port; }
 
-    // resolve hostname to IP address, not changing port or sin_family
-    // return true on success.
-    // thread safe
-    static bool resolve(std::string hostname, InetAddress* result);
+    // Resolve hostname to IP address with explicit output port/family.
+    // Returns true on success. Thread safe.
+    static bool resolve(std::string hostname, InetAddress* result, uint16_t port = 0, sa_family_t family = AF_UNSPEC);
 
 private:
     union {

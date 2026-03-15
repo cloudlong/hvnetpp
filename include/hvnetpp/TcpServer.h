@@ -19,6 +19,8 @@ public:
     TcpServer(EventLoop* loop, const InetAddress& listenAddr, const std::string& nameArg);
     ~TcpServer();
 
+    // Safe to call from any thread. The actual listen step runs on the loop thread.
+    // Socket setup failures are logged and leave the server idle instead of aborting the process.
     void start();
     
     void setConnectionCallback(const ConnectionCallback& cb) { connectionCallback_ = cb; }
@@ -41,6 +43,7 @@ private:
     ConnectionCallback connectionCallback_;
     MessageCallback messageCallback_;
     WriteCompleteCallback writeCompleteCallback_;
+    std::shared_ptr<bool> callbackToken_;
     
     int nextConnId_;
     ConnectionMap connections_;

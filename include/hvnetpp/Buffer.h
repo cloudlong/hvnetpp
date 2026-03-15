@@ -100,7 +100,7 @@ private:
             // move readable data to the front, freeing space at the end
             assert(kCheapPrepend < readerIndex_);
             size_t readable = readableBytes();
-            std::copy(begin() + readerIndex_, begin() + writerIndex_, begin() + kCheapPrepend);
+            std::memmove(begin() + kCheapPrepend, begin() + readerIndex_, readable);
             readerIndex_ = kCheapPrepend;
             writerIndex_ = readerIndex_ + readable;
             assert(readable == readableBytes());

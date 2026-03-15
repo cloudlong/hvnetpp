@@ -3,6 +3,8 @@
 #include "hvnetpp/EventLoop.h"
 #include "hvnetpp/SocketsOps.h"
 #include "rtclog.h"
+#include <cerrno>
+#include <cstring>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
@@ -26,7 +28,7 @@ TcpConnection::TcpConnection(EventLoop* loop,
     channel_->setReadCallback(std::bind(&TcpConnection::handleRead, this));
     channel_->setWriteCallback(std::bind(&TcpConnection::handleWrite, this));
     channel_->setCloseCallback(std::bind(&TcpConnection::handleClose, this));
-    channel_->setErrorCallback(std::bind(&TcpConnection::handleError, this));
+    channel_->setErrorCallback(std::bind(static_cast<void (TcpConnection::*)()>(&TcpConnection::handleError), this));
 }
 
 TcpConnection::~TcpConnection() {
@@ -46,7 +48,7 @@ void TcpConnection::connectEstablished() {
 
 void TcpConnection::connectDestroyed() {
     loop_->assertInLoopThread();
-    if (state() == kConnected) {
+    if (state() != kDisconnected) {
         setState(kDisconnected);
         channel_->disableAll();
         if (connectionCallback_) {
@@ -59,6 +61,9 @@ void TcpConnection::connectDestroyed() {
 
 void TcpConnection::handleRead() {
     loop_->assertInLoopThread();
+    if (state() == kDisconnected) {
+        return;
+    }
     int savedErrno = 0;
     ssize_t n = inputBuffer_.readFd(channel_->fd(), &savedErrno);
     if (n > 0) {
@@ -68,12 +73,15 @@ void TcpConnection::handleRead() {
     } else if (n == 0) {
         handleClose();
     } else {
-        handleError();
+        handleError(savedErrno);
     }
 }
 
 void TcpConnection::handleWrite() {
     loop_->assertInLoopThread();
+    if (state() == kDisconnected) {
+        return;
+    }
     if (channel_->isWriting()) {
         ssize_t n = ::write(channel_->fd(), outputBuffer_.peek(), outputBuffer_.readableBytes());
         if (n > 0) {
@@ -88,7 +96,7 @@ void TcpConnection::handleWrite() {
                 }
             }
         } else {
-            RTCLOG(RTC_ERROR, "TcpConnection::handleWrite error: %s", strerror(errno));
+            handleError(n == 0 ? EPIPE : errno);
         }
     }
 }
@@ -110,7 +118,19 @@ void TcpConnection::handleClose() {
 
 void TcpConnection::handleError() {
     int err = sockets::getSocketError(channel_->fd());
-    RTCLOG(RTC_ERROR, "TcpConnection::handleError name=%s - SO_ERROR=%d: %s", name_.c_str(), err, strerror(err));
+    if (err != 0) {
+        handleError(err);
+    }
+}
+
+void TcpConnection::handleError(int err) {
+    if (err == 0 || err == EAGAIN || err == EWOULDBLOCK || err == EINTR) {
+        return;
+    }
+    RTCLOG(RTC_ERROR, "TcpConnection::handleError name=%s - error=%d: %s", name_.c_str(), err, strerror(err));
+    if (state() == kConnected || state() == kDisconnecting) {
+        handleClose();
+    }
 }
 
 void TcpConnection::send(const std::string& message) {
@@ -168,11 +188,12 @@ void TcpConnection::sendInLoop(const void* data, size_t len) {
                 loop_->queueInLoop(std::bind(writeCompleteCallback_, shared_from_this()));
             }
         } else {
+            const int savedErrno = errno;
             nwrote = 0;
-            if (errno != EWOULDBLOCK) {
-                if (errno == EPIPE || errno == ECONNRESET) {
-                    faultError = true;
-                }
+            if (savedErrno != EWOULDBLOCK && savedErrno != EAGAIN && savedErrno != EINTR) {
+                faultError = true;
+                handleError(savedErrno);
+                remaining = 0;
             }
         }
     }

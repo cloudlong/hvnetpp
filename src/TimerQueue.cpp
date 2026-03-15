@@ -1,6 +1,7 @@
 #include "hvnetpp/TimerQueue.h"
 #include "hvnetpp/EventLoop.h"
 #include "rtclog.h"
+#include <cstdlib>
 #include <sys/timerfd.h>
 #include <unistd.h>
 #include <cstring>
@@ -12,6 +13,7 @@ int createTimerfd() {
     int timerfd = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (timerfd < 0) {
         RTCLOG(RTC_FATAL, "Failed in createTimerfd error: %s", strerror(errno));
+        std::abort();
     }
     return timerfd;
 }

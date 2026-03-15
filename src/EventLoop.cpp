@@ -207,16 +207,22 @@ void EventLoop::cancel(TimerId timerId) {
 
 void EventLoop::queueInLoop(Functor cb) {
     PendingQueue::Node* node = nullptr;
+    std::unique_ptr<Functor> functor;
     if (pendingQueue_->isValid()) {
+        functor.reset(new Functor(std::move(cb)));
         node = pendingQueue_->reserve();
     }
 
     if (node) {
-        node->data.functorPtr = new Functor(std::move(cb));
+        node->data.functorPtr = functor.release();
         pendingQueue_->commit(node, 1);
     } else {
         std::lock_guard<std::mutex> lock(mutex_);
-        pendingFunctors_.emplace_back(std::move(cb));
+        if (functor) {
+            pendingFunctors_.emplace_back(std::move(*functor));
+        } else {
+            pendingFunctors_.emplace_back(std::move(cb));
+        }
         RTCLOG(RTC_WARN, "queueInLoop lock-free queue unavailable/full, using fallback queue");
     }
 

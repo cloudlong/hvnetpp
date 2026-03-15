@@ -3,6 +3,7 @@
 #include "rtclog.h"
 #include <sys/epoll.h>
 #include <unistd.h>
+#include <cstdlib>
 #include <cstring>
 #include <assert.h>
 #include <cerrno>
@@ -15,6 +16,7 @@ Poller::Poller(EventLoop* loop)
       events_(kInitEventListSize) {
     if (epollfd_ < 0) {
         RTCLOG(RTC_FATAL, "Poller::Poller error: %s", strerror(errno));
+        std::abort();
     }
 }
 
@@ -50,8 +52,10 @@ void Poller::fillActiveChannels(int numEvents, ChannelList* activeChannels) cons
 
 void Poller::updateChannel(Channel* channel) {
     const int index = channel->index();
-    if (index == -1) {
-        // a new one, add to epoll
+    if (index == -1 || index == 2) {
+        if (channel->isNoneEvent()) {
+            return;
+        }
         update(EPOLL_CTL_ADD, channel);
         channel->set_index(1);
         channels_[channel->fd()] = channel;
@@ -93,6 +97,7 @@ void Poller::update(int operation, Channel* channel) {
             RTCLOG(RTC_ERROR, "epoll_ctl op=%d fd=%d error: %s", operation, fd, strerror(errno));
         } else {
             RTCLOG(RTC_FATAL, "epoll_ctl op=%d fd=%d error: %s", operation, fd, strerror(errno));
+            std::abort();
         }
     }
 }

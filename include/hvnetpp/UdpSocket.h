@@ -1,10 +1,7 @@
 #pragma once
 
-#include "hvnetpp/Buffer.h"
-#include <atomic>
 #include <memory>
 #include <functional>
-#include <sys/types.h>
 #include <vector>
 #include "hvnetpp/InetAddress.h"
 
@@ -12,46 +9,26 @@ namespace hvnetpp {
 
 class EventLoop;
 class Channel;
+class Buffer;
 
 class UdpSocket {
 public:
-    enum class State {
-        kClosed,
-        kOpened,
-        kBound,
-        kReceiving,
-    };
-
-    // Runs on the owning loop thread. The memory is owned by the socket and is only valid during the callback.
-    using ReadCallback = std::function<void(const InetAddress& peerAddr, const void* data, size_t len)>;
+    using ReadCallback = std::function<void(const InetAddress& peerAddr, Buffer* buf)>;
     
     UdpSocket(EventLoop* loop, const std::string& name);
+    // 收养一个已创建（可能已 bind/connect）的非阻塞 UDP fd，fd 生命周期交由本对象管理
+    UdpSocket(EventLoop* loop, const std::string& name, int sockfd, sa_family_t family);
     ~UdpSocket();
 
-    // Optional pre-open step. Use this to pin the family and surface socket-creation errors early.
-    bool open(sa_family_t family);
-
-    // Safe to call from any thread. Lazily opens the socket if needed.
-    // Binding does not implicitly enable receiving; call startReceive() when ready.
     bool bind(const InetAddress& addr);
-    // Convenience helper for the common server case.
-    bool bindAndStart(const InetAddress& addr);
-    // Safe to call from any thread.
-    // Returns false if the socket has not been bound yet.
-    bool startReceive();
-    // Safe to call from any thread.
-    void stopReceive();
+    // 开始监听可读事件（收养 fd 场景使用）；须在 loop 线程调用
+    void startReading();
     void setReadCallback(ReadCallback cb) { readCallback_ = std::move(cb); }
     
-    // Safe to call from any thread. Lazily opens the socket if needed.
+    // Send data to destination
     ssize_t sendTo(const void* data, size_t len, const InetAddress& destAddr);
-    // Does not mutate `buf`.
-    ssize_t sendTo(const Buffer& buf, const InetAddress& destAddr);
+    ssize_t sendTo(Buffer* buf, const InetAddress& destAddr);
 
-    State state() const { return state_.load(std::memory_order_acquire); }
-    bool isOpen() const { return state() != State::kClosed; }
-    bool isBound() const { return state() == State::kBound || state() == State::kReceiving; }
-    bool isReceiving() const { return state() == State::kReceiving; }
     int fd() const { return sockfd_; }
 
 private:
@@ -62,7 +39,6 @@ private:
     const std::string name_;
     sa_family_t family_;
     int sockfd_;
-    std::atomic<State> state_;
     std::shared_ptr<Channel> channel_;
     std::shared_ptr<bool> callbackToken_;
     ReadCallback readCallback_;

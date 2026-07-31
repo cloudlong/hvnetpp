@@ -1,0 +1,7 @@
+2026-07-31 13:15:54.286 INFO RTCLOG udp_client_test.cpp:30 reply from 127.0.0.1:18120: udp message 0 
+2026-07-31 13:15:54.487 INFO RTCLOG udp_client_test.cpp:30 reply from 127.0.0.1:18120: udp message 1 
+2026-07-31 13:15:54.687 INFO RTCLOG udp_client_test.cpp:30 reply from 127.0.0.1:18120: udp message 2 
+2026-07-31 13:15:54.887 INFO RTCLOG udp_client_test.cpp:30 reply from 127.0.0.1:18120: udp message 3 
+2026-07-31 13:15:55.089 INFO RTCLOG udp_client_test.cpp:30 reply from 127.0.0.1:18120: udp message 4 
+2026-07-31 13:15:55.787 INFO RTCLOG UdpClient.cpp:109 UdpClient[udp-cli] stopped 
+2026-07-31 13:15:55.788 INFO RTCLOG udp_client_test.cpp:44 sent 5, received 5 

@@ -1,51 +1,61 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(hvnetpp)
+project(hvnetpp CXX)
 
-set(CMAKE_CXX_STANDARD 11)
+if(NOT UNIX)
+    message(FATAL_ERROR "hvnetpp is Linux-only (requires epoll/timerfd/eventfd)")
+endif()
+
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON) # Generate position independent code (fPIC)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Find dependencies
 find_package(Threads REQUIRED)
 find_package(Backtrace)
 
-# Include directories
-# Add src/thirdparty/rtclog so we can include "rtclog.h"
-include_directories(include)
-include_directories(src/thirdparty/rtclog)
+# 显式源文件列表（不用 GLOB，避免新增/删除文件时构建悄悄漏编）
+set(HVNETPP_SOURCES
+    src/Acceptor.cpp
+    src/Buffer.cpp
+    src/Channel.cpp
+    src/CircularBuffer.cpp
+    src/Connector.cpp
+    src/EventLoop.cpp
+    src/EventLoopThread.cpp
+    src/EventLoopThreadPool.cpp
+    src/InetAddress.cpp
+    src/Poller.cpp
+    src/SocketChannel.cpp
+    src/SocketsOps.cpp
+    src/TcpClient.cpp
+    src/TcpServer.cpp
+    src/Timer.cpp
+    src/TimerQueue.cpp
+    src/UdpClient.cpp
+    src/UdpServer.cpp
+    src/UdpSocket.cpp
+    src/Unpack.cpp
+    src/thirdparty/rtclog/easylogging++.cc
+    src/thirdparty/rtclog/rtclog.cpp
+)
 
-# Source files
-# Note: Added .cc extension to include easylogging++.cc
-file(GLOB_RECURSE SOURCES "src/*.cpp" "src/*.c" "src/*.cc")
-file(GLOB_RECURSE HEADERS "include/hvnetpp/*.h" "src/thirdparty/rtclog/*.h")
+add_library(hvnetpp STATIC ${HVNETPP_SOURCES})
 
-# Create the static library
-add_library(hvnetpp STATIC ${SOURCES} ${HEADERS})
-
-# Configure target include directories
-target_include_directories(hvnetpp PUBLIC 
+target_include_directories(hvnetpp PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/thirdparty/rtclog>
     $<INSTALL_INTERFACE:include>
 )
 
-# Link libraries
 target_link_libraries(hvnetpp PUBLIC Threads::Threads)
 
 if(Backtrace_FOUND)
     target_link_libraries(hvnetpp PRIVATE ${Backtrace_LIBRARIES})
     target_include_directories(hvnetpp PRIVATE ${Backtrace_INCLUDE_DIRS})
-    add_definitions(-DHAVE_BACKTRACE) # Optional: Define macro if code uses it
+    target_compile_definitions(hvnetpp PRIVATE HAVE_BACKTRACE)
 endif()
 
-# Test executable
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_build.cpp")
-    add_executable(test_build test_build.cpp)
-    target_link_libraries(test_build PRIVATE hvnetpp)
-endif()
-
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/demo_timer.cpp")
-    add_executable(demo_timer demo_timer.cpp)
-    target_link_libraries(demo_timer PRIVATE hvnetpp)
+option(HVNETPP_BUILD_EXAMPLES "Build hvnetpp examples" ON)
+if(HVNETPP_BUILD_EXAMPLES)
+    add_subdirectory(examples)
 endif()

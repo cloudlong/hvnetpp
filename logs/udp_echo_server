@@ -1,0 +1,9 @@
+2026-07-31 13:15:53.788 INFO RTCLOG UdpServer.cpp:50 UdpServer[udp-echo] bound on 0.0.0.0:18120 
+2026-07-31 13:15:53.789 INFO RTCLOG udp_echo_server.cpp:33 udp echo server started on port 18120, Ctrl-C to quit 
+2026-07-31 13:15:54.286 INFO RTCLOG udp_echo_server.cpp:29 recv 13 bytes from 127.0.0.1:57520: udp message 0 
+2026-07-31 13:15:54.486 INFO RTCLOG udp_echo_server.cpp:29 recv 13 bytes from 127.0.0.1:57520: udp message 1 
+2026-07-31 13:15:54.686 INFO RTCLOG udp_echo_server.cpp:29 recv 13 bytes from 127.0.0.1:57520: udp message 2 
+2026-07-31 13:15:54.886 INFO RTCLOG udp_echo_server.cpp:29 recv 13 bytes from 127.0.0.1:57520: udp message 3 
+2026-07-31 13:15:55.087 INFO RTCLOG udp_echo_server.cpp:29 recv 13 bytes from 127.0.0.1:57520: udp message 4 
+2026-07-31 13:15:55.790 INFO RTCLOG udp_echo_server.cpp:29 recv 9 bytes from 127.0.0.1:49983: from-bash 
+2026-07-31 13:15:58.790 INFO RTCLOG UdpServer.cpp:96 UdpServer[udp-echo] stopped 

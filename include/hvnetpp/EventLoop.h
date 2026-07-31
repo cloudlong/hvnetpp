@@ -6,6 +6,7 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <vector>
 #include <sys/types.h>
 
 #include "hvnetpp/TimerId.h"
@@ -16,9 +17,7 @@ namespace hvnetpp {
 
 class Channel;
 class Poller;
-class TcpConnection;
-class UdpSocket;
-class Acceptor;
+// class TimerQueue; // Moved to include header
 
 class EventLoop {
 public:
@@ -27,51 +26,27 @@ public:
     EventLoop();
     ~EventLoop();
 
-    // Must be called on the owning thread and blocks until quit().
     void loop();
-    // Safe to call from any thread.
     void quit();
 
-    // Safe to call from any thread. Runs immediately on the loop thread, otherwise queues.
     void runInLoop(Functor cb);
-    // Safe to call from any thread. Always queues for later execution on the loop thread.
     void queueInLoop(Functor cb);
 
-    bool isInLoopThread() const { return threadId_ == std::this_thread::get_id(); }
-
-    // Safe to call from any thread.
-    TimerId runAt(Timestamp time, TimerCallback cb);
-    // Safe to call from any thread. Compatibility overload using seconds.
-    TimerId runAfter(double delay, TimerCallback cb);
-    // Safe to call from any thread.
-    TimerId runAfter(TimeDelta delay, TimerCallback cb);
-    template <class Rep, class Period>
-    TimerId runAfter(const std::chrono::duration<Rep, Period>& delay, TimerCallback cb) {
-        return runAfter(std::chrono::duration_cast<TimeDelta>(delay), std::move(cb));
-    }
-
-    // Safe to call from any thread. Compatibility overload using seconds.
-    TimerId runEvery(double interval, TimerCallback cb);
-    // Safe to call from any thread.
-    TimerId runEvery(TimeDelta interval, TimerCallback cb);
-    template <class Rep, class Period>
-    TimerId runEvery(const std::chrono::duration<Rep, Period>& interval, TimerCallback cb) {
-        return runEvery(std::chrono::duration_cast<TimeDelta>(interval), std::move(cb));
-    }
-    // Safe to call from any thread.
-    void cancel(TimerId timerId);
-
-private:
-    friend class Channel;
-    friend class TimerQueue;
-    friend class TcpConnection;
-    friend class UdpSocket;
-    friend class Acceptor;
-
+    // Internal usage
     void updateChannel(Channel* channel);
     void removeChannel(Channel* channel);
     bool hasChannel(Channel* channel);
+
+    bool isInLoopThread() const { return threadId_ == std::this_thread::get_id(); }
     void assertInLoopThread();
+
+    // Timers (simplified interface)
+    TimerId runAt(Timestamp time, TimerCallback cb);
+    TimerId runAfter(double delay, TimerCallback cb);
+    TimerId runEvery(double interval, TimerCallback cb);
+    void cancel(TimerId timerId);
+
+private:
     void wakeup();
     void handleRead(); // for wake up
     void doPendingFunctors();

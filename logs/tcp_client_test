@@ -1,0 +1,33 @@
+2026-07-31 13:11:33.684 WARNING RTCLOG Connector.cpp:103 Connector connect to 127.0.0.1:18110 poll error: Connection refused 
+2026-07-31 13:11:33.685 WARNING RTCLOG tcp_client_test.cpp:42 connect attempt failed 
+2026-07-31 13:11:33.686 INFO RTCLOG TcpClient.cpp:229 TcpClient[demo-cli] reconnect to 127.0.0.1:18110 in 1000 ms (retry 1) 
+2026-07-31 13:11:34.687 WARNING RTCLOG Connector.cpp:103 Connector connect to 127.0.0.1:18110 poll error: Connection refused 
+2026-07-31 13:11:34.688 WARNING RTCLOG tcp_client_test.cpp:42 connect attempt failed 
+2026-07-31 13:11:34.689 INFO RTCLOG TcpClient.cpp:229 TcpClient[demo-cli] reconnect to 127.0.0.1:18110 in 2000 ms (retry 2) 
+2026-07-31 13:11:36.690 WARNING RTCLOG Connector.cpp:103 Connector connect to 127.0.0.1:18110 poll error: Connection refused 
+2026-07-31 13:11:36.694 WARNING RTCLOG tcp_client_test.cpp:42 connect attempt failed 
+2026-07-31 13:11:36.694 INFO RTCLOG TcpClient.cpp:229 TcpClient[demo-cli] reconnect to 127.0.0.1:18110 in 4000 ms (retry 3) 
+2026-07-31 13:11:40.695 INFO RTCLOG tcp_client_test.cpp:32 connected to 127.0.0.1:18110 (local 127.0.0.1:57252) 
+2026-07-31 13:11:40.696 INFO RTCLOG tcp_client_test.cpp:39 recv 0 bytes: hello from client 
+2026-07-31 13:11:41.657 INFO RTCLOG tcp_client_test.cpp:35 disconnected from 127.0.0.1:18110 
+2026-07-31 13:11:41.658 INFO RTCLOG TcpClient.cpp:229 TcpClient[demo-cli] reconnect to 127.0.0.1:18110 in 1000 ms (retry 1) 
+2026-07-31 13:11:42.658 WARNING RTCLOG Connector.cpp:103 Connector connect to 127.0.0.1:18110 poll error: Connection refused 
+2026-07-31 13:11:42.660 WARNING RTCLOG tcp_client_test.cpp:42 connect attempt failed 
+2026-07-31 13:11:42.660 INFO RTCLOG TcpClient.cpp:229 TcpClient[demo-cli] reconnect to 127.0.0.1:18110 in 2000 ms (retry 2) 
+2026-07-31 13:11:44.661 WARNING RTCLOG Connector.cpp:103 Connector connect to 127.0.0.1:18110 poll error: Connection refused 
+2026-07-31 13:11:44.662 WARNING RTCLOG tcp_client_test.cpp:42 connect attempt failed 
+2026-07-31 13:11:44.663 INFO RTCLOG TcpClient.cpp:229 TcpClient[demo-cli] reconnect to 127.0.0.1:18110 in 4000 ms (retry 3) 
+2026-07-31 13:11:47.686 INFO RTCLOG TcpClient.cpp:157 TcpClient[demo-cli] stopped 
+2026-07-31 13:11:47.687 INFO RTCLOG tcp_client_test.cpp:56 bye 
+2026-07-31 13:35:54.788 INFO RTCLOG tcp_client_test.cpp:32 connected to 127.0.0.1:18150 (local 127.0.0.1:43042) 
+2026-07-31 13:35:54.790 INFO RTCLOG tcp_client_test.cpp:40 recv 17 bytes: hello from client 
+2026-07-31 13:35:56.791 INFO RTCLOG tcp_client_test.cpp:35 disconnected from 127.0.0.1:18150 
+2026-07-31 13:35:56.792 INFO RTCLOG TcpClient.cpp:229 TcpClient[demo-cli] reconnect to 127.0.0.1:18150 in 1000 ms (retry 1) 
+2026-07-31 13:35:57.793 WARNING RTCLOG Connector.cpp:103 Connector connect to 127.0.0.1:18150 poll error: Connection refused 
+2026-07-31 13:35:57.794 WARNING RTCLOG tcp_client_test.cpp:43 connect attempt failed 
+2026-07-31 13:35:57.795 INFO RTCLOG TcpClient.cpp:229 TcpClient[demo-cli] reconnect to 127.0.0.1:18150 in 2000 ms (retry 2) 
+2026-07-31 13:35:59.795 WARNING RTCLOG Connector.cpp:103 Connector connect to 127.0.0.1:18150 poll error: Connection refused 
+2026-07-31 13:35:59.796 WARNING RTCLOG tcp_client_test.cpp:43 connect attempt failed 
+2026-07-31 13:35:59.797 INFO RTCLOG TcpClient.cpp:229 TcpClient[demo-cli] reconnect to 127.0.0.1:18150 in 4000 ms (retry 3) 
+2026-07-31 13:36:02.790 INFO RTCLOG TcpClient.cpp:157 TcpClient[demo-cli] stopped 
+2026-07-31 13:36:02.791 INFO RTCLOG tcp_client_test.cpp:57 bye 

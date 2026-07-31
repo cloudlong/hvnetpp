@@ -7,16 +7,15 @@
 namespace hvnetpp {
 
 using Timestamp = std::chrono::steady_clock::time_point;
-using TimeDelta = std::chrono::microseconds;
 using TimerCallback = std::function<void()>;
 
 class Timer {
 public:
-    Timer(TimerCallback cb, Timestamp when, TimeDelta interval)
+    Timer(TimerCallback cb, Timestamp when, double interval)
         : callback_(std::move(cb)),
           expiration_(when),
           interval_(interval),
-          repeat_(interval.count() > 0) {
+          repeat_(interval > 0.0) {
     }
 
     void run() const {
@@ -24,7 +23,6 @@ public:
     }
 
     Timestamp expiration() const { return expiration_; }
-    TimeDelta interval() const { return interval_; }
     bool repeat() const { return repeat_; }
     int64_t sequence() const { return sequence_; }
 
@@ -35,7 +33,7 @@ public:
 private:
     const TimerCallback callback_;
     Timestamp expiration_;
-    const TimeDelta interval_;
+    const double interval_;
     const bool repeat_;
     const int64_t sequence_ = s_numCreated_.fetch_add(1, std::memory_order_relaxed) + 1;
 

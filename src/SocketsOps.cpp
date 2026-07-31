@@ -1,20 +1,21 @@
-#include "SocketsOps.h"
-
+#include "hvnetpp/SocketsOps.h"
 #include "rtclog.h"
-
-#include <assert.h>
 #include <errno.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
+#include <fcntl.h>
 #include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <assert.h>
+#include <cstdlib>
+#include <cstring>
 
 namespace hvnetpp {
-namespace detail {
 namespace sockets {
+
+using SA = struct sockaddr;
 
 namespace {
 
@@ -25,52 +26,74 @@ socklen_t sockaddrLength(const struct sockaddr* addr) {
 
 } // namespace
 
-int createNonblocking(sa_family_t family) {
+const SA* sockaddr_cast(const struct sockaddr_in* addr) {
+    return static_cast<const SA*>(static_cast<const void*>(addr));
+}
+
+const SA* sockaddr_cast(const struct sockaddr_in6* addr) {
+    return static_cast<const SA*>(static_cast<const void*>(addr));
+}
+
+SA* sockaddr_cast(struct sockaddr_in6* addr) {
+    return static_cast<SA*>(static_cast<void*>(addr));
+}
+
+const struct sockaddr_in* sockaddr_in_cast(const struct sockaddr* addr) {
+    return static_cast<const struct sockaddr_in*>(static_cast<const void*>(addr));
+}
+
+const struct sockaddr_in6* sockaddr_in6_cast(const struct sockaddr* addr) {
+    return static_cast<const struct sockaddr_in6*>(static_cast<const void*>(addr));
+}
+
+int createNonblockingOrDie(sa_family_t family) {
     int sockfd = ::socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
     if (sockfd < 0) {
-        RTCLOG(RTC_ERROR, "detail::sockets::createNonblocking error: %s", strerror(errno));
+        RTCLOG(RTC_FATAL, "sockets::createNonblockingOrDie");
+        abort();
     }
     return sockfd;
 }
 
-int createNonblockingUdp(sa_family_t family) {
+int createNonblockingUdpOrDie(sa_family_t family) {
     int sockfd = ::socket(family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_UDP);
     if (sockfd < 0) {
-        RTCLOG(RTC_ERROR, "detail::sockets::createNonblockingUdp error: %s", strerror(errno));
+        RTCLOG(RTC_FATAL, "sockets::createNonblockingUdpOrDie");
+        abort();
     }
     return sockfd;
 }
 
-bool bind(int sockfd, const InetAddress& addr) {
-    if (::bind(sockfd, addr.getSockAddr(), addr.length()) < 0) {
-        RTCLOG(RTC_ERROR, "detail::sockets::bind error: %s", strerror(errno));
-        return false;
+void bindOrDie(int sockfd, const struct sockaddr* addr) {
+    int ret = ::bind(sockfd, addr, sockaddrLength(addr));
+    if (ret < 0) {
+        RTCLOG(RTC_FATAL, "sockets::bindOrDie");
+        abort();
     }
-    return true;
 }
 
-bool listen(int sockfd) {
-    if (::listen(sockfd, SOMAXCONN) < 0) {
-        RTCLOG(RTC_ERROR, "detail::sockets::listen error: %s", strerror(errno));
-        return false;
+void listenOrDie(int sockfd) {
+    int ret = ::listen(sockfd, SOMAXCONN);
+    if (ret < 0) {
+        RTCLOG(RTC_FATAL, "sockets::listenOrDie");
+        abort();
     }
-    return true;
 }
 
-int accept(int sockfd, struct sockaddr_storage* addr, socklen_t* addrlen) {
-    int connfd = ::accept4(sockfd,
-                           reinterpret_cast<struct sockaddr*>(addr),
-                           addrlen,
-                           SOCK_NONBLOCK | SOCK_CLOEXEC);
+int accept(int sockfd, struct sockaddr_in6* addr) {
+    socklen_t addrlen = static_cast<socklen_t>(sizeof *addr);
+    int connfd = ::accept4(sockfd, sockaddr_cast(addr),
+                           &addrlen, SOCK_NONBLOCK | SOCK_CLOEXEC);
     if (connfd < 0) {
-        const int savedErrno = errno;
+        int savedErrno = errno;
         switch (savedErrno) {
             case EAGAIN:
             case ECONNABORTED:
             case EINTR:
-            case EPROTO:
+            case EPROTO: // ???
             case EPERM:
-            case EMFILE:
+            case EMFILE: // per-process lmit of open file desctiptor ???
+                // expected errors
                 errno = savedErrno;
                 break;
             case EBADF:
@@ -81,14 +104,13 @@ int accept(int sockfd, struct sockaddr_storage* addr, socklen_t* addrlen) {
             case ENOMEM:
             case ENOTSOCK:
             case EOPNOTSUPP:
-                RTCLOG(RTC_ERROR, "detail::sockets::accept error: %s", strerror(savedErrno));
+                // unexpected errors
+                RTCLOG(RTC_ERROR, "Socket::accept error: %s", strerror(savedErrno));
                 RTCLOG(RTC_FATAL, "unexpected error of ::accept %d", savedErrno);
-                abort();
                 break;
             default:
-                RTCLOG(RTC_ERROR, "detail::sockets::accept error: %s", strerror(savedErrno));
+                RTCLOG(RTC_ERROR, "Socket::accept error: %s", strerror(savedErrno));
                 RTCLOG(RTC_FATAL, "unknown error of ::accept %d", savedErrno);
-                abort();
                 break;
         }
     }
@@ -99,27 +121,27 @@ int connect(int sockfd, const struct sockaddr* addr) {
     return ::connect(sockfd, addr, sockaddrLength(addr));
 }
 
-ssize_t read(int sockfd, void* buf, size_t count) {
+ssize_t read(int sockfd, void *buf, size_t count) {
     return ::read(sockfd, buf, count);
 }
 
-ssize_t readv(int sockfd, const struct iovec* iov, int iovcnt) {
+ssize_t readv(int sockfd, const struct iovec *iov, int iovcnt) {
     return ::readv(sockfd, iov, iovcnt);
 }
 
-ssize_t write(int sockfd, const void* buf, size_t count) {
+ssize_t write(int sockfd, const void *buf, size_t count) {
     return ::write(sockfd, buf, count);
 }
 
 void close(int sockfd) {
     if (::close(sockfd) < 0) {
-        RTCLOG(RTC_ERROR, "detail::sockets::close error: %s", strerror(errno));
+        RTCLOG(RTC_ERROR, "sockets::close error: %s", strerror(errno));
     }
 }
 
 void shutdownWrite(int sockfd) {
     if (::shutdown(sockfd, SHUT_WR) < 0) {
-        RTCLOG(RTC_ERROR, "detail::sockets::shutdownWrite error: %s", strerror(errno));
+        RTCLOG(RTC_ERROR, "sockets::shutdownWrite error: %s", strerror(errno));
     }
 }
 
@@ -128,11 +150,11 @@ void toIpPort(char* buf, size_t size, const struct sockaddr* addr) {
     toIp(ip, sizeof ip, addr);
     uint16_t port = 0;
     if (addr->sa_family == AF_INET) {
-        const struct sockaddr_in* addr4 = reinterpret_cast<const struct sockaddr_in*>(addr);
+        const struct sockaddr_in* addr4 = sockaddr_in_cast(addr);
         port = ntohs(addr4->sin_port);
         snprintf(buf, size, "%s:%u", ip, port);
     } else if (addr->sa_family == AF_INET6) {
-        const struct sockaddr_in6* addr6 = reinterpret_cast<const struct sockaddr_in6*>(addr);
+        const struct sockaddr_in6* addr6 = sockaddr_in6_cast(addr);
         port = ntohs(addr6->sin6_port);
         snprintf(buf, size, "[%s]:%u", ip, port);
     } else if (size > 0) {
@@ -143,45 +165,35 @@ void toIpPort(char* buf, size_t size, const struct sockaddr* addr) {
 void toIp(char* buf, size_t size, const struct sockaddr* addr) {
     if (addr->sa_family == AF_INET) {
         assert(size >= INET_ADDRSTRLEN);
-        const struct sockaddr_in* addr4 = reinterpret_cast<const struct sockaddr_in*>(addr);
+        const struct sockaddr_in* addr4 = sockaddr_in_cast(addr);
         ::inet_ntop(AF_INET, &addr4->sin_addr, buf, static_cast<socklen_t>(size));
     } else if (addr->sa_family == AF_INET6) {
         assert(size >= INET6_ADDRSTRLEN);
-        const struct sockaddr_in6* addr6 = reinterpret_cast<const struct sockaddr_in6*>(addr);
+        const struct sockaddr_in6* addr6 = sockaddr_in6_cast(addr);
         ::inet_ntop(AF_INET6, &addr6->sin6_addr, buf, static_cast<socklen_t>(size));
-    } else if (size > 0) {
-        buf[0] = '\0';
     }
 }
 
-bool fromIpPort(const char* ip, uint16_t port, struct sockaddr_in* addr) {
+void fromIpPort(const char* ip, uint16_t port, struct sockaddr_in* addr) {
     addr->sin_family = AF_INET;
     addr->sin_port = htons(port);
-    const int ret = ::inet_pton(AF_INET, ip, &addr->sin_addr);
+    int ret = ::inet_pton(AF_INET, ip, &addr->sin_addr);
     if (ret == 0) {
-        RTCLOG(RTC_ERROR, "detail::sockets::fromIpPort invalid IPv4 address: %s", ip);
-        return false;
+        RTCLOG(RTC_ERROR, "sockets::fromIpPort invalid IPv4 address: %s", ip);
+    } else if (ret < 0) {
+        RTCLOG(RTC_ERROR, "sockets::fromIpPort error: %s", strerror(errno));
     }
-    if (ret < 0) {
-        RTCLOG(RTC_ERROR, "detail::sockets::fromIpPort error: %s", strerror(errno));
-        return false;
-    }
-    return true;
 }
 
-bool fromIpPort(const char* ip, uint16_t port, struct sockaddr_in6* addr) {
+void fromIpPort(const char* ip, uint16_t port, struct sockaddr_in6* addr) {
     addr->sin6_family = AF_INET6;
     addr->sin6_port = htons(port);
-    const int ret = ::inet_pton(AF_INET6, ip, &addr->sin6_addr);
+    int ret = ::inet_pton(AF_INET6, ip, &addr->sin6_addr);
     if (ret == 0) {
-        RTCLOG(RTC_ERROR, "detail::sockets::fromIpPort invalid IPv6 address: %s", ip);
-        return false;
+        RTCLOG(RTC_ERROR, "sockets::fromIpPort invalid IPv6 address: %s", ip);
+    } else if (ret < 0) {
+        RTCLOG(RTC_ERROR, "sockets::fromIpPort error: %s", strerror(errno));
     }
-    if (ret < 0) {
-        RTCLOG(RTC_ERROR, "detail::sockets::fromIpPort error: %s", strerror(errno));
-        return false;
-    }
-    return true;
 }
 
 int getSocketError(int sockfd) {
@@ -189,50 +201,45 @@ int getSocketError(int sockfd) {
     socklen_t optlen = static_cast<socklen_t>(sizeof optval);
     if (::getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &optval, &optlen) < 0) {
         return errno;
+    } else {
+        return optval;
     }
-    return optval;
 }
 
-InetAddress getLocalAddr(int sockfd) {
-    struct sockaddr_storage addr;
-    memset(&addr, 0, sizeof addr);
-    socklen_t addrlen = static_cast<socklen_t>(sizeof addr);
-    if (::getsockname(sockfd, reinterpret_cast<struct sockaddr*>(&addr), &addrlen) < 0) {
-        RTCLOG(RTC_ERROR, "detail::sockets::getLocalAddr error: %s", strerror(errno));
+struct sockaddr_in6 getLocalAddr(int sockfd) {
+    struct sockaddr_in6 localaddr;
+    bzero(&localaddr, sizeof localaddr);
+    socklen_t addrlen = static_cast<socklen_t>(sizeof localaddr);
+    if (::getsockname(sockfd, sockaddr_cast(&localaddr), &addrlen) < 0) {
+        RTCLOG(RTC_ERROR, "sockets::getLocalAddr error: %s", strerror(errno));
     }
-    return InetAddress(reinterpret_cast<const struct sockaddr*>(&addr), addrlen);
+    return localaddr;
 }
 
-InetAddress getPeerAddr(int sockfd) {
-    struct sockaddr_storage addr;
-    memset(&addr, 0, sizeof addr);
-    socklen_t addrlen = static_cast<socklen_t>(sizeof addr);
-    if (::getpeername(sockfd, reinterpret_cast<struct sockaddr*>(&addr), &addrlen) < 0) {
-        RTCLOG(RTC_ERROR, "detail::sockets::getPeerAddr error: %s", strerror(errno));
+struct sockaddr_in6 getPeerAddr(int sockfd) {
+    struct sockaddr_in6 peeraddr;
+    bzero(&peeraddr, sizeof peeraddr);
+    socklen_t addrlen = static_cast<socklen_t>(sizeof peeraddr);
+    if (::getpeername(sockfd, sockaddr_cast(&peeraddr), &addrlen) < 0) {
+        RTCLOG(RTC_ERROR, "sockets::getPeerAddr error: %s", strerror(errno));
     }
-    return InetAddress(reinterpret_cast<const struct sockaddr*>(&addr), addrlen);
+    return peeraddr;
 }
 
 bool isSelfConnect(int sockfd) {
-    InetAddress localaddr = getLocalAddr(sockfd);
-    InetAddress peeraddr = getPeerAddr(sockfd);
-    if (localaddr.isIpv4() && peeraddr.isIpv4()) {
-        const struct sockaddr_in* laddr4 =
-            reinterpret_cast<const struct sockaddr_in*>(localaddr.getSockAddr());
-        const struct sockaddr_in* raddr4 =
-            reinterpret_cast<const struct sockaddr_in*>(peeraddr.getSockAddr());
+    struct sockaddr_in6 localaddr = getLocalAddr(sockfd);
+    struct sockaddr_in6 peeraddr = getPeerAddr(sockfd);
+    if (localaddr.sin6_family == AF_INET) {
+        const struct sockaddr_in* laddr4 = reinterpret_cast<struct sockaddr_in*>(&localaddr);
+        const struct sockaddr_in* raddr4 = reinterpret_cast<struct sockaddr_in*>(&peeraddr);
         return laddr4->sin_port == raddr4->sin_port
             && laddr4->sin_addr.s_addr == raddr4->sin_addr.s_addr;
+    } else if (localaddr.sin6_family == AF_INET6) {
+        return localaddr.sin6_port == peeraddr.sin6_port
+            && memcmp(&localaddr.sin6_addr, &peeraddr.sin6_addr, sizeof localaddr.sin6_addr) == 0;
+    } else {
+        return false;
     }
-    if (localaddr.isIpv6() && peeraddr.isIpv6()) {
-        const struct sockaddr_in6* laddr6 =
-            reinterpret_cast<const struct sockaddr_in6*>(localaddr.getSockAddr());
-        const struct sockaddr_in6* raddr6 =
-            reinterpret_cast<const struct sockaddr_in6*>(peeraddr.getSockAddr());
-        return laddr6->sin6_port == raddr6->sin6_port
-            && memcmp(&laddr6->sin6_addr, &raddr6->sin6_addr, sizeof laddr6->sin6_addr) == 0;
-    }
-    return false;
 }
 
 void setTcpNoDelay(int sockfd, bool on) {
@@ -256,5 +263,4 @@ void setKeepAlive(int sockfd, bool on) {
 }
 
 } // namespace sockets
-} // namespace detail
 } // namespace hvnetpp

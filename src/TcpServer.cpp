@@ -1,255 +1,227 @@
 #include "hvnetpp/TcpServer.h"
+#include "Acceptor.h"
 #include "hvnetpp/EventLoop.h"
-#include "hvnetpp/Channel.h"
-#include "hvnetpp/InetAddress.h"
-#include "SocketsOps.h"
+#include "hvnetpp/EventLoopThreadPool.h"
+#include "hvnetpp/SocketsOps.h"
 #include "rtclog.h"
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <fcntl.h>
+
 #include <assert.h>
 #include <cerrno>
 #include <cstring>
-#include <cstdio>
+#include <future>
+#include <string.h>
+#include <unistd.h>
+#include <vector>
 
 namespace hvnetpp {
 
-namespace {
-
-void cleanupAcceptor(EventLoop* loop, std::shared_ptr<Channel> channel, int acceptSocket, int idleFd) {
-    auto cleanup = [loop, channel, acceptSocket, idleFd]() {
-        if (channel) {
-            channel->disableAll();
-            channel->remove();
-            loop->queueInLoop([channel]() {});
-        }
-        if (acceptSocket >= 0) {
-            detail::sockets::close(acceptSocket);
-        }
-        if (idleFd >= 0) {
-            detail::sockets::close(idleFd);
-        }
-    };
-
-    if (loop->isInLoopThread()) {
-        cleanup();
-    } else {
-        loop->queueInLoop(std::move(cleanup));
-    }
-}
-
-int openIdleFd() {
-    int idleFd = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
-    if (idleFd < 0) {
-        RTCLOG(RTC_ERROR, "Acceptor::openIdleFd error: %s", strerror(errno));
-    }
-    return idleFd;
-}
-
-} // namespace
-
-// Internal Acceptor class
-class Acceptor : public std::enable_shared_from_this<Acceptor> {
-public:
-    using NewConnectionCallback = std::function<void(int sockfd, const InetAddress&)>;
-
-    Acceptor(EventLoop* loop, const InetAddress& listenAddr, bool reuseport)
-        : loop_(loop),
-          listenAddr_(listenAddr),
-          reuseport_(reuseport),
-          acceptSocket_(-1),
-          acceptChannel_(),
-          listening_(false),
-          idleFd_(openIdleFd()) {
-    }
-
-    ~Acceptor() {
-        std::shared_ptr<Channel> acceptChannel = std::move(acceptChannel_);
-        const int acceptSocket = acceptSocket_;
-        const int idleFd = idleFd_;
-        acceptSocket_ = -1;
-        idleFd_ = -1;
-        cleanupAcceptor(loop_, std::move(acceptChannel), acceptSocket, idleFd);
-    }
-
-    bool listen() {
-        loop_->assertInLoopThread();
-        if (listening_) {
-            return true;
-        }
-
-        const int sockfd = detail::sockets::createNonblocking(listenAddr_.family());
-        if (sockfd < 0) {
-            return false;
-        }
-
-        detail::sockets::setReuseAddr(sockfd, true);
-        detail::sockets::setReusePort(sockfd, reuseport_);
-        if (!detail::sockets::bind(sockfd, listenAddr_)) {
-            detail::sockets::close(sockfd);
-            return false;
-        }
-        if (!detail::sockets::listen(sockfd)) {
-            detail::sockets::close(sockfd);
-            return false;
-        }
-
-        acceptSocket_ = sockfd;
-        acceptChannel_ = std::make_shared<Channel>(loop_, acceptSocket_);
-        acceptChannel_->setReadCallback(std::bind(&Acceptor::handleRead, this));
-        acceptChannel_->tie(shared_from_this());
-        acceptChannel_->enableReading();
-        listening_ = true;
-        return true;
-    }
-
-    void setNewConnectionCallback(const NewConnectionCallback& cb) {
-        newConnectionCallback_ = cb;
-    }
-
-private:
-    void handleRead() {
-        loop_->assertInLoopThread();
-        while (true) {
-            struct sockaddr_storage peerAddr;
-            socklen_t peerAddrLen = sizeof peerAddr;
-            int connfd = detail::sockets::accept(acceptSocket_, &peerAddr, &peerAddrLen);
-            if (connfd >= 0) {
-                if (newConnectionCallback_) {
-                    InetAddress peer(reinterpret_cast<const struct sockaddr*>(&peerAddr), peerAddrLen);
-                    newConnectionCallback_(connfd, peer);
-                } else {
-                    detail::sockets::close(connfd);
-                }
-                continue;
-            }
-
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break;
-            }
-
-            if (errno == EMFILE) {
-                if (idleFd_ >= 0) {
-                    ::close(idleFd_);
-                }
-                idleFd_ = ::accept(acceptSocket_, NULL, NULL);
-                if (idleFd_ >= 0) {
-                    ::close(idleFd_);
-                }
-                idleFd_ = openIdleFd();
-            }
-            break;
-        }
-    }
-
-    EventLoop* loop_;
-    InetAddress listenAddr_;
-    bool reuseport_;
-    int acceptSocket_;
-    std::shared_ptr<Channel> acceptChannel_;
-    NewConnectionCallback newConnectionCallback_;
-    bool listening_;
-    int idleFd_;
-};
-
-TcpServer::TcpServer(EventLoop* loop, const InetAddress& listenAddr, const std::string& nameArg)
-    : loop_(loop),
-      name_(nameArg),
-      acceptor_(std::make_shared<Acceptor>(loop, listenAddr, true)),
-      callbackToken_(std::make_shared<bool>(true)),
-      state_(State::kIdle),
-      nextConnId_(1) {
-    std::weak_ptr<bool> token = callbackToken_;
-    acceptor_->setNewConnectionCallback([this, token](int sockfd, const InetAddress& peerAddr) {
-        if (token.lock()) {
-            newConnection(sockfd, peerAddr);
-        } else {
-            detail::sockets::close(sockfd);
-        }
-    });
+TcpServer::TcpServer(std::string name)
+    : name_(std::move(name)),
+      acceptorThread_(EventLoopThread::ThreadInitCallback(), name_ + "-acceptor") {
 }
 
 TcpServer::~TcpServer() {
-    callbackToken_.reset();
-    state_.store(State::kIdle, std::memory_order_release);
+    if (started_) {
+        stop();
+    }
+    closesocket();
+}
 
-    ConnectionMap connections = std::move(connections_);
-    acceptor_.reset();
-    for (auto& item : connections) {
-        TcpConnectionPtr conn = std::move(item.second);
-        if (!conn) {
-            continue;
-        }
-        conn->setCloseCallback(TcpConnection::CloseCallback());
-        conn->getLoop()->runInLoop([conn]() {
-            conn->connectDestroyed();
-        });
+int TcpServer::createsocket(int port, const char* host) {
+    assert(!started_);
+    if (listenfd_ >= 0) {
+        closesocket();
+    }
+    bool ipv6 = (host != nullptr && ::strchr(host, ':') != nullptr);
+    listenAddr_ = InetAddress(host ? host : "0.0.0.0", static_cast<uint16_t>(port), ipv6);
+    int fd = sockets::createNonblockingOrDie(listenAddr_.family());
+    sockets::setReuseAddr(fd, true);
+    sockets::setReusePort(fd, true);
+    socklen_t addrlen = ipv6 ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
+    if (::bind(fd, listenAddr_.getSockAddr(), addrlen) < 0) {
+        RTCLOG(RTC_ERROR, "TcpServer[%s] bind %s failed: %s",
+               name_.c_str(), listenAddr_.toIpPort().c_str(), strerror(errno));
+        sockets::close(fd);
+        return -1;
+    }
+    listenfd_ = fd;
+    return listenfd_;
+}
+
+void TcpServer::closesocket() {
+    if (listenfd_ >= 0 && !acceptor_) {
+        // fd 已交给 Acceptor 时由 Acceptor 析构关闭
+        sockets::close(listenfd_);
+    }
+    listenfd_ = -1;
+}
+
+void TcpServer::setUnpack(const unpack_setting_t* setting) {
+    if (setting && setting->mode != UNPACK_MODE_NONE) {
+        unpack_.reset(new unpack_setting_t(*setting));
+    } else {
+        unpack_.reset();
     }
 }
 
-TcpServer::State TcpServer::start() {
-    const State current = state();
-    if (current != State::kIdle) {
-        return current;
+void TcpServer::start(bool wait_threads_started) {
+    (void)wait_threads_started; // 线程启动本身就是同步等待的，参数为对齐 libhv API 保留
+    if (listenfd_ < 0) {
+        RTCLOG(RTC_ERROR, "TcpServer[%s] start without createsocket", name_.c_str());
+        return;
+    }
+    bool expected = false;
+    if (!started_.compare_exchange_strong(expected, true)) {
+        return;
     }
 
-    std::shared_ptr<Acceptor> acceptor = acceptor_;
-    std::weak_ptr<bool> token = callbackToken_;
-    state_.store(State::kStarting, std::memory_order_release);
-    if (loop_->isInLoopThread()) {
-        const bool ok = acceptor && acceptor->listen();
-        state_.store(ok ? State::kListening : State::kIdle, std::memory_order_release);
-        return state();
-    }
+    acceptorLoop_ = acceptorThread_.startLoop();
+    workerPool_.reset(new EventLoopThreadPool(acceptorLoop_, name_));
+    workerPool_->setThreadNum(threadNum_);
 
-    loop_->queueInLoop([this, acceptor, token]() {
-        if (token.lock()) {
-            const bool ok = acceptor && acceptor->listen();
-            state_.store(ok ? State::kListening : State::kIdle, std::memory_order_release);
-        }
+    std::promise<void> started;
+    acceptorLoop_->runInLoop([this, &started] {
+        workerPool_->start();
+        acceptor_ = std::make_shared<Acceptor>(acceptorLoop_, listenfd_);
+        acceptor_->tieChannel();
+        acceptor_->setNewConnectionCallback(
+            std::bind(&TcpServer::newConnection, this, std::placeholders::_1, std::placeholders::_2));
+        acceptor_->listen();
+        started.set_value();
     });
-    return State::kStarting;
+    started.get_future().wait();
+    RTCLOG(RTC_INFO, "TcpServer[%s] listening on %s with %d worker thread(s)",
+           name_.c_str(), listenAddr_.toIpPort().c_str(), threadNum_);
+}
+
+void TcpServer::stop(bool wait_threads_stopped) {
+    (void)wait_threads_stopped;
+    bool expected = true;
+    if (!started_.compare_exchange_strong(expected, false)) {
+        return;
+    }
+    // 禁止在本服务器的回调（即自有 loop 线程）里调用 stop，否则下面的同步等待会死锁
+    assert(!acceptorLoop_->isInLoopThread());
+
+    // 1. 停止接受新连接
+    {
+        std::promise<void> done;
+        acceptorLoop_->runInLoop([this, &done] {
+            acceptor_.reset();
+            done.set_value();
+        });
+        done.get_future().wait();
+        listenfd_ = -1; // fd 已随 Acceptor 关闭
+    }
+
+    // 2. 强制关闭全部连接（在各自 loop 内一步完成 close + destroy）
+    std::vector<SocketChannelPtr> channels;
+    {
+        std::lock_guard<std::mutex> lock(connMutex_);
+        for (auto& item : connections_) {
+            channels.push_back(item.second);
+        }
+        connections_.clear();
+    }
+    for (auto& ch : channels) {
+        ch->loop()->runInLoop([ch] { ch->forceCloseInLoop(); });
+    }
+    channels.clear();
+
+    // 3. 栅栏：确保上面的关闭任务都已执行完
+    std::vector<std::future<void>> barriers;
+    for (EventLoop* loop : workerPool_->getAllLoops()) {
+        auto p = std::make_shared<std::promise<void>>();
+        barriers.push_back(p->get_future());
+        loop->queueInLoop([p] { p->set_value(); });
+    }
+    for (auto& f : barriers) {
+        f.wait();
+    }
+
+    // 4/5. 停 worker 线程与 accept 线程
+    workerPool_->stop();
+    acceptorThread_.stop();
+    acceptorLoop_ = nullptr;
+    RTCLOG(RTC_INFO, "TcpServer[%s] stopped", name_.c_str());
 }
 
 void TcpServer::newConnection(int sockfd, const InetAddress& peerAddr) {
-    loop_->assertInLoopThread();
-    char buf[64];
-    snprintf(buf, sizeof buf, "-%s#%d", name_.c_str(), nextConnId_);
-    ++nextConnId_;
-    std::string connName = name_ + buf;
+    acceptorLoop_->assertInLoopThread();
 
-    InetAddress localAddr = detail::sockets::getLocalAddr(sockfd);
+    uint32_t maxConn = maxConnections_.load();
+    if (maxConn > 0 && connectionNum() >= maxConn) {
+        RTCLOG(RTC_WARN, "TcpServer[%s] reach max connection num %u, reject %s",
+               name_.c_str(), maxConn, peerAddr.toIpPort().c_str());
+        sockets::close(sockfd);
+        return;
+    }
 
-    TcpConnectionPtr conn(new TcpConnection(loop_, connName, sockfd, localAddr, peerAddr));
-    connections_[connName] = conn;
-    conn->setConnectionCallback(connectionCallback_);
-    conn->setMessageCallback(messageCallback_);
-    conn->setWriteCompleteCallback(writeCompleteCallback_);
-    std::weak_ptr<bool> token = callbackToken_;
-    conn->setCloseCallback([this, token](const TcpConnectionPtr& connection) {
-        if (token.lock()) {
-            removeConnection(connection);
-        }
+    EventLoop* ioLoop = workerPool_->getNextLoop();
+    InetAddress localAddr(sockets::getLocalAddr(sockfd));
+    SocketChannelPtr channel = std::make_shared<SocketChannel>(ioLoop, sockfd, localAddr, peerAddr);
+    if (unpack_) {
+        channel->setUnpack(unpack_.get());
+    }
+    if (keepaliveTimeoutMs_ > 0) {
+        channel->setKeepaliveTimeout(keepaliveTimeoutMs_);
+    }
+    channel->setConnectionCallback([this](const SocketChannelPtr& ch) {
+        if (onConnection) onConnection(ch);
     });
-    
-    loop_->runInLoop(std::bind(&TcpConnection::connectEstablished, conn));
+    channel->setMessageCallback([this](const SocketChannelPtr& ch, Buffer* buf) {
+        if (onMessage) onMessage(ch, buf);
+    });
+    channel->setWriteCompleteCallback([this](const SocketChannelPtr& ch) {
+        if (onWriteComplete) onWriteComplete(ch);
+    });
+    channel->setCloseCallback(std::bind(&TcpServer::removeChannel, this, std::placeholders::_1));
+
+    {
+        std::lock_guard<std::mutex> lock(connMutex_);
+        connections_[channel->id()] = channel;
+    }
+    ioLoop->runInLoop([channel] { channel->connectEstablished(); });
 }
 
-void TcpServer::removeConnection(const TcpConnectionPtr& conn) {
-    std::weak_ptr<bool> token = callbackToken_;
-    loop_->runInLoop([this, token, conn]() {
-        if (token.lock()) {
-            removeConnectionInLoop(conn);
+void TcpServer::removeChannel(const SocketChannelPtr& channel) {
+    {
+        std::lock_guard<std::mutex> lock(connMutex_);
+        connections_.erase(channel->id());
+    }
+    channel->loop()->queueInLoop([channel] { channel->connectDestroyed(); });
+}
+
+size_t TcpServer::connectionNum() const {
+    std::lock_guard<std::mutex> lock(connMutex_);
+    return connections_.size();
+}
+
+void TcpServer::foreachChannel(const std::function<void(const SocketChannelPtr&)>& fn) {
+    std::vector<SocketChannelPtr> channels;
+    {
+        std::lock_guard<std::mutex> lock(connMutex_);
+        for (auto& item : connections_) {
+            channels.push_back(item.second);
         }
+    }
+    for (auto& ch : channels) {
+        fn(ch);
+    }
+}
+
+void TcpServer::broadcast(const void* data, size_t len) {
+    foreachChannel([data, len](const SocketChannelPtr& ch) {
+        ch->write(data, len);
     });
 }
 
-void TcpServer::removeConnectionInLoop(const TcpConnectionPtr& conn) {
-    loop_->assertInLoopThread();
-    size_t n = connections_.erase(conn->name());
-    assert(n == 1);
-    loop_->queueInLoop(std::bind(&TcpConnection::connectDestroyed, conn));
+void TcpServer::broadcast(const std::string& msg) {
+    broadcast(msg.data(), msg.size());
+}
+
+EventLoop* TcpServer::loop() {
+    return acceptorLoop_;
 }
 
 } // namespace hvnetpp

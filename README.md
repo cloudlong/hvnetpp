@@ -1,168 +1,193 @@
 # hvnetpp
 
-A lightweight C++ network framework based on the Reactor pattern.
+一个 libhv 风格的 C++ Reactor 网络库（仅支持 Linux）。
 
-## Introduction
+## 特性
 
-hvnetpp is a high-performance, non-blocking network library for C++. It uses `epoll` for event notification and provides a simple API for building TCP servers and UDP applications. It is designed to be easy to understand and use, making it suitable for learning network programming or building small to medium-sized network applications on Linux.
+- **多 Reactor 多线程**：accept 独立线程 + `setThreadNum(N)` worker 线程池，one loop per thread
+- **TCP 服务端/客户端**：`TcpServer` / `TcpClient`，libhv evpp 风格 API（`onConnection`/`onMessage` 公有回调成员）
+- **断线重连**：`reconn_setting_t` 支持固定/线性/指数退避、最大重试次数、连接超时
+- **拆包（unpack）**：固定长度 / 分隔符 / 长度字段三种模式，粘包半包自动处理
+- **心跳与空闲踢连接**：`setHeartbeat(interval, fn)`、`setKeepaliveTimeout(ms)`
+- **UDP**：`UdpServer` / `UdpClient`（可选 connected-UDP 模式）
+- **定时器**：`runAfter` / `runEvery` / `cancel`，基于 timerfd + steady_clock
+- **底层**：epoll（LT）、eventfd 唤醒、无锁 MPSC 任务队列、muduo 风格 Buffer
 
-## Features
+## 环境要求
 
-- **Non-blocking I/O**: Based on the Reactor pattern using `epoll` (Linux only).
-- **TCP Support**: Easy-to-use `TcpServer` and `TcpConnection` classes for handling TCP connections.
-- **UDP Support**: explicit `UdpSocket` lifecycle for bind/send/receive.
-- **Address Utilities**: `InetAddress` as a concrete endpoint value type plus a separate `Resolver` for DNS.
-- **Timers**: Efficient timer management via `TimerQueue`.
-- **Callbacks**: Modern C++11 callbacks (`std::function`) for connection establishment, message reception, and write completion.
-- **Logging**: Integrated logging via `rtclog`.
+- Linux（依赖 `epoll` / `timerfd` / `eventfd`）
+- C++14 编译器（GCC 5+ / Clang）
+- CMake 3.10+
 
-## Requirements
+## 构建
 
-- **Operating System**: Linux (requires `sys/epoll.h`).
-- **Compiler**: C++11 compliant compiler (e.g., GCC, Clang).
-- **Build System**: CMake 3.10 or higher.
+推荐使用构建脚本（Windows 下请在 WSL 中运行）：
 
-## Build Instructions
+```bash
+./script/build.sh                  # Release 构建
+./script/build.sh -t Debug --test  # Debug 构建并运行拆包回归测试
+./script/build.sh -c --ubsan       # 干净重建 UBSan(trap) 版本，无需 libubsan
+./script/build.sh --asan           # ASan+UBSan 版本（需系统装有 libasan）
+./script/build.sh --help           # 全部选项
+```
 
-1.  Clone the repository:
-    ```bash
-    git clone https://github.com/walkerlinrtc/hvnetpp.git
-    cd hvnetpp
-    ```
+或直接用 CMake：
 
-2.  Create a build directory:
-    ```bash
-    mkdir build
-    cd build
-    ```
+```bash
+cmake -S . -B build
+cmake --build build -j
+# 示例在 build/examples/ 下；关闭示例: -DHVNETPP_BUILD_EXAMPLES=OFF
+```
 
-3.  Run CMake and make:
-    ```bash
-    cmake ..
-    make
-    ```
+## 快速上手
 
-4.  Run the test server (if built):
-    ```bash
-    ./test_build
-    ```
-
-## Usage Example
-
-Below is a simple example of a TCP Server that logs connections and messages:
+### TCP 服务端
 
 ```cpp
-#include "hvnetpp/EventLoop.h"
-#include "hvnetpp/TcpServer.h"
-#include "rtclog.h"
-#include <iostream>
+#include "hvnetpp/hvnetpp.h"
+using namespace hvnetpp;
 
 int main() {
-    // Initialize logger
-    rtclog_init("TestServer");
-    rtclog_set_level(RTC_INFO);
+    TcpServer srv("echo");
+    srv.createsocket(1234);          // 建 socket + bind，失败返回 -1
+    srv.setThreadNum(4);             // 4 个 worker 线程；0 = 所有 IO 在 accept 线程
+    srv.setKeepaliveTimeout(60000);  // 60 秒无数据踢掉连接（可选）
 
-    hvnetpp::EventLoop loop;
-    hvnetpp::InetAddress addr(9999); // Listen on port 9999
+    srv.onConnection = [](const SocketChannelPtr& ch) {
+        // 建立与断开都走这里，用 isConnected() 区分
+        printf("%s %s\n", ch->peeraddr().c_str(), ch->isConnected() ? "connected" : "disconnected");
+    };
+    srv.onMessage = [](const SocketChannelPtr& ch, Buffer* buf) {
+        ch->write(buf);              // echo；write/close 线程安全
+    };
 
-    hvnetpp::TcpServer server(&loop, addr, "TestServer");
-
-    // Set connection callback
-    server.setConnectionCallback([](const hvnetpp::TcpConnectionPtr& conn) {
-        if (conn->connected()) {
-            RTCLOG(RTC_INFO, "Client connected: %s", conn->peerAddress().toIpPort().c_str());
-        } else {
-            RTCLOG(RTC_INFO, "Client disconnected: %s", conn->peerAddress().toIpPort().c_str());
-        }
-    });
-
-    // Set message callback
-    server.setMessageCallback([](const hvnetpp::TcpConnectionPtr& conn, hvnetpp::Buffer* buf) {
-        std::string msg = buf->retrieveAllAsString();
-        RTCLOG(RTC_INFO, "Received %d bytes: %s", msg.size(), msg.c_str());
-        conn->send(msg); // Echo back
-    });
-
-    server.start();
-    loop.loop(); // Start the event loop
-
-    return 0;
+    srv.start();                     // 返回后即开始服务
+    // ... 阻塞等待退出信号 ...
+    srv.stop();                      // 关闭全部连接并 join 线程（勿在回调中调用）
 }
 ```
 
-## Address And DNS
-
-`InetAddress` is the public endpoint value type. It stores one concrete `sockaddr` and is responsible for parse/format helpers such as `toIp()` and `toIpPort()`.
-
-Hostname resolution lives in `Resolver` instead of `InetAddress`:
+### TCP 客户端（重连 + 心跳）
 
 ```cpp
-#include "hvnetpp/Resolver.h"
-#include <sys/socket.h>
+TcpClient cli("demo");
+cli.createsocket(1234, "127.0.0.1");   // 支持域名
+cli.setConnectTimeout(3000);
 
-hvnetpp::InetAddress addr;
-int resolveError = 0;
-if (hvnetpp::Resolver::resolve("localhost", &addr, 8080, AF_UNSPEC, SOCK_STREAM, &resolveError)) {
-    // addr now contains one resolved endpoint
-} else {
-    RTCLOG(RTC_ERROR, "resolve failed: %s", hvnetpp::Resolver::errorString(resolveError));
-}
+reconn_setting_t reconn;               // 默认 1s 起指数退避、上限 60s、无限重试
+reconn.max_retry_cnt = 10;
+cli.setReconnect(&reconn);
+
+cli.setHeartbeat(5000, [&cli] { cli.send(std::string("ping")); });
+
+cli.onConnection = [](const SocketChannelPtr& ch) { /* ... */ };
+cli.onMessage    = [](const SocketChannelPtr& ch, Buffer* buf) { /* ... */ };
+cli.onConnectFailed = [] { /* 每次尝试失败回调 */ };
+
+cli.start();
+cli.send(std::string("hello"));
+// ...
+cli.stop();
 ```
 
-`SocketsOps` is now an internal implementation detail under `src/` and is no longer part of the public include surface.
+### 拆包（unpack）
 
-For raw IP literals, prefer `InetAddress::tryParse(...)` when the input comes from users or config files.
-
-## UDP Lifecycle
-
-`UdpSocket` now uses a more explicit lifecycle:
+设置后 `onMessage` 每次收到的都是一个完整包（含包头/分隔符）：
 
 ```cpp
-hvnetpp::UdpSocket udp(&loop, "echo-udp");
-udp.setReadCallback([](const hvnetpp::InetAddress& peer, const void* data, size_t len) {
-    // `data` is owned by the socket and is only valid during the callback
-});
+unpack_setting_t s;
 
-if (udp.bindAndStart(hvnetpp::InetAddress::any(9000))) {
-    // receiving is now active
-}
+// 1) 固定长度
+s.mode = UNPACK_BY_FIXED_LENGTH;
+s.fixed_length = 16;
+
+// 2) 分隔符（如 \r\n）
+s.mode = UNPACK_BY_DELIMITER;
+s.delimiter[0] = '\r'; s.delimiter[1] = '\n';
+s.delimiter_bytes = 2;
+
+// 3) 长度字段: [4 字节 BE 包体长度][包体]
+//    packet_len = body_offset + 长度字段值 + length_adjustment
+s.mode = UNPACK_BY_LENGTH_FIELD;
+s.body_offset = 4;            // 包头长度
+s.length_field_offset = 0;
+s.length_field_bytes = 4;     // 1/2/4/8
+s.length_field_coding = ENCODE_BY_BIG_ENDIAN;
+
+srv.setUnpack(&s);   // TcpServer / TcpClient / SocketChannel 均可设置
 ```
 
-`bind()` no longer starts read interest implicitly, `startReceive()` now reports failure instead of silently doing nothing on an unbound socket, and `sendTo(const Buffer&)` does not mutate the caller's buffer. For sender-only sockets, `sendTo(...)` still lazily opens the underlying UDP fd.
+超过 `package_max_length`（默认 2MB）视为协议错误并关闭连接。
 
-## TCP Sending And Start State
-
-`TcpConnection::send(const std::string&)`, `send(const void*, size_t)`, and `send(const Buffer&)` copy bytes into the send path and do not mutate caller-owned memory. The legacy `send(Buffer*)` overload is still available as a transfer-style compatibility API and clears the readable bytes from the buffer.
-
-`TcpServer::start()` now returns a state value:
-
-- `kListening`: the socket is already listening now
-- `kStarting`: the start request was queued to the loop thread
-- `kIdle`: an immediate start attempt failed and the server stayed idle
-
-## Timer API
-
-The timer API accepts both the legacy `double` seconds form and `std::chrono` durations. New code can use the chrono overloads directly:
+### UDP
 
 ```cpp
-using namespace std::chrono;
+UdpServer srv;
+srv.createsocket(9999);
+srv.onMessage = [&srv](const InetAddress& peer, Buffer* buf) {
+    srv.sendto(buf->retrieveAllAsString(), peer);   // echo
+};
+srv.start();
 
-loop.runAfter(2500ms, []() {
-    RTCLOG(RTC_INFO, "fires once after 2.5 seconds");
-});
-
-hvnetpp::TimerId id = loop.runEvery(1s, []() {
-    RTCLOG(RTC_INFO, "fires every second");
-});
-
-if (id) {
-    loop.cancel(id);
-}
+UdpClient cli;
+cli.createsocket(9999, "127.0.0.1");
+cli.setConnectedUdp(true);   // 可选：内核过滤 peer，ICMP 错误可见
+cli.onMessage = [](const InetAddress& peer, Buffer* buf) { /* ... */ };
+cli.start();
+cli.send(std::string("hello"));
 ```
 
-## Directory Structure
+注：数据报语义下发送不做 EAGAIN 缓冲，失败返回 -1（errno 保留）。
 
-- `include/hvnetpp/`: Public header files.
-- `src/`: Source code implementation.
-  - `thirdparty/`: Third-party libraries (e.g., rtclog).
-- `test_build.cpp`: Example usage file.
+## 线程模型
+
+```
+TcpServer
+  ├─ acceptor 线程: accept() → round-robin 分发给 worker
+  └─ worker 线程 × N: 每线程一个 EventLoop，连接的读写/定时器/回调都在其属主 loop 线程执行
+TcpClient / UdpServer / UdpClient
+  └─ 自带 1 个 loop 线程
+```
+
+- `SocketChannel::write() / close()`、`TcpServer::broadcast()/foreachChannel()/connectionNum()`、`TcpClient::send()` 线程安全，可跨线程调用
+- 其余配置接口（`setUnpack` 等）须在 `start()` 前或所属 loop 线程内调用
+- `stop()` 不可在本对象自己的回调中调用（内部同步等待会死锁，debug 版有断言）
+
+## 目录结构
+
+- `include/hvnetpp/` — 公共头文件（`hvnetpp.h` 为伞形头）
+- `src/` — 实现与内部类（Acceptor / Connector / Poller 等）
+- `src/thirdparty/rtclog/` — 日志库
+- `examples/` — 示例程序：
+  - `tcp_echo_server` — 多线程 echo + keepalive
+  - `tcp_chat_server` — 长度字段拆包 + broadcast 聊天室
+  - `tcp_client_test` — 重连退避 + 心跳
+  - `udp_echo_server` / `udp_client_test` — UDP 往返
+  - `timer_demo` — 定时器用法
+  - `unpack_selftest` — 拆包回归测试
+
+## 注意事项
+
+- **不要在回调里调用 `stop()`**：`TcpServer`/`TcpClient`/`UdpServer`/`UdpClient` 的 `stop()` 内部会同步等待自有 loop 线程执行完关闭流程，在本对象自己的回调（即其 loop 线程）里调用会死锁，debug 构建下有断言拦截。需要在回调中触发退出时，请通知外部线程（如信号量/条件变量）由外部调用 `stop()`。
+- **配置接口的调用时机**：`setThreadNum` / `setUnpack` / `setReconnect` / `setConnectTimeout` / `setMaxConnectionNum` 等配置须在 `start()` 之前调用；`SocketChannel` 上的 `setUnpack` / `setKeepaliveTimeout` / `setHeartbeat` 须在其所属 loop 线程内（如 `onConnection` 回调中）调用。线程安全的接口只有明确标注的那些：`write`/`close`/`send`/`broadcast`/`foreachChannel`/`connectionNum` 等。
+- **onConnection 一个回调管两件事**：连接建立与断开都走 `onConnection`，用 `ch->isConnected()` 区分，与 libhv 行为一致。
+- **拆包回调收到的是完整包**：含包头/分隔符本身；超过 `package_max_length`（默认 2MB）视为协议错误并关闭连接。varint 长度编码暂不支持。
+- **UDP 发送不做缓冲**：数据报语义下 `sendto`/`send` 遇 EAGAIN 直接返回 -1（errno 保留），不排队重发，由调用方决定是否重试。
+- **新增源文件要手动登记**：CMake 使用显式源文件列表（不用 GLOB），在 `src/` 下新增 `.cpp` 后需同步加进根目录 `CMakeLists.txt` 的 `HVNETPP_SOURCES`。
+- **C++ 标准为 C++14**：从旧版的 C++11 升级而来（使用了 lambda init-capture、`std::make_unique` 等）。
+- **在 Windows 上开发时 IDE 会误报**：本库仅支持 Linux（依赖 `epoll.h`/`endian.h` 等），Windows 下 clangd/IntelliSense 找不到这些头文件属预期误报，以 Linux（如 WSL）下的实际编译为准；如需消除可为 clangd 配置 WSL 工具链。
+- **建议的额外验证**：本库已在 UBSan（trap 模式）+ `_GLIBCXX_ASSERTIONS` 下通过 echo/重连/聊天室压测；若你的环境装有 libasan，建议再以 `-fsanitize=address` 构建复跑一遍示例场景。
+
+## 与旧版 API 的差异（breaking change）
+
+旧的 muduo 风格 `TcpServer(loop, addr, name)` + `TcpConnection` + `setXxxCallback()` 接口已移除，替换为 libhv evpp 风格：
+
+| 旧 | 新 |
+|---|---|
+| `TcpServer(&loop, addr, name)` + 外部 `loop.loop()` | `TcpServer srv; srv.createsocket(port); srv.start();`（内部自管线程） |
+| `TcpConnectionPtr` | `SocketChannelPtr` |
+| `setConnectionCallback(cb)` | `srv.onConnection = cb;` |
+| `conn->send(msg)` | `ch->write(msg)` |
+| 无客户端 | `TcpClient`（重连/超时/心跳） |
+
+与 libhv 的差异：`TcpClient::createsocket` 只解析记录地址（每次连接尝试新建 fd 以保证重连干净），返回 0/-1 而非 fd。

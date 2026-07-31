@@ -1,0 +1,28 @@
+2026-07-31 13:01:46.699 INFO RTCLOG TcpServer.cpp:93 TcpServer[echo] listening on 0.0.0.0:18100 with 4 worker thread(s) 
+2026-07-31 13:01:46.700 INFO RTCLOG tcp_echo_server.cpp:45 echo server started on port 18100, keepalive=3000ms, Ctrl-C to quit 
+2026-07-31 13:04:41.401 INFO RTCLOG TcpServer.cpp:93 TcpServer[echo] listening on 0.0.0.0:18100 with 4 worker thread(s) 
+2026-07-31 13:04:41.402 INFO RTCLOG tcp_echo_server.cpp:45 echo server started on port 18100, keepalive=3000ms, Ctrl-C to quit 
+2026-07-31 13:05:41.371 INFO RTCLOG TcpServer.cpp:146 TcpServer[echo] stopped 
+2026-07-31 13:05:41.372 INFO RTCLOG tcp_echo_server.cpp:53 bye 
+2026-07-31 13:06:05.356 INFO RTCLOG TcpServer.cpp:93 TcpServer[echo] listening on 0.0.0.0:18102 with 4 worker thread(s) 
+2026-07-31 13:06:05.356 INFO RTCLOG tcp_echo_server.cpp:45 echo server started on port 18102, keepalive=3000ms, Ctrl-C to quit 
+2026-07-31 13:06:05.836 INFO RTCLOG tcp_echo_server.cpp:34 connected: id=1 127.0.0.1:40768 -> 127.0.0.1:18102 (total 1) 
+2026-07-31 13:06:05.837 INFO RTCLOG tcp_echo_server.cpp:34 connected: id=2 127.0.0.1:40782 -> 127.0.0.1:18102 (total 2) 
+2026-07-31 13:06:05.838 INFO RTCLOG tcp_echo_server.cpp:37 disconnected: id=2 127.0.0.1:40782 
+2026-07-31 13:06:08.837 WARNING RTCLOG SocketChannel.cpp:374 SocketChannel id=1 peer=127.0.0.1:40768 keepalive timeout (3000 ms >= 3000 ms), closing 
+2026-07-31 13:06:08.838 INFO RTCLOG tcp_echo_server.cpp:37 disconnected: id=1 127.0.0.1:40768 
+2026-07-31 13:06:08.843 INFO RTCLOG TcpServer.cpp:146 TcpServer[echo] stopped 
+2026-07-31 13:06:08.843 INFO RTCLOG tcp_echo_server.cpp:53 bye 
+2026-07-31 13:11:37.672 INFO RTCLOG TcpServer.cpp:93 TcpServer[echo] listening on 0.0.0.0:18110 with 4 worker thread(s) 
+2026-07-31 13:11:37.674 INFO RTCLOG tcp_echo_server.cpp:45 echo server started on port 18110, keepalive=0ms, Ctrl-C to quit 
+2026-07-31 13:11:40.695 INFO RTCLOG tcp_echo_server.cpp:34 connected: id=1 127.0.0.1:57252 -> 127.0.0.1:18110 (total 1) 
+2026-07-31 13:11:41.656 INFO RTCLOG tcp_echo_server.cpp:37 disconnected: id=1 127.0.0.1:57252 
+2026-07-31 13:11:41.658 INFO RTCLOG TcpServer.cpp:146 TcpServer[echo] stopped 
+2026-07-31 13:11:41.658 INFO RTCLOG tcp_echo_server.cpp:53 bye 
+2026-07-31 13:35:53.788 INFO RTCLOG TcpServer.cpp:93 TcpServer[echo] listening on 0.0.0.0:18150 with 4 worker thread(s) 
+2026-07-31 13:35:53.789 INFO RTCLOG tcp_echo_server.cpp:45 echo server started on port 18150, keepalive=2000ms, Ctrl-C to quit 
+2026-07-31 13:35:54.789 INFO RTCLOG tcp_echo_server.cpp:34 connected: id=1 127.0.0.1:43042 -> 127.0.0.1:18150 (total 1) 
+2026-07-31 13:35:56.790 WARNING RTCLOG SocketChannel.cpp:379 SocketChannel id=1 peer=127.0.0.1:43042 keepalive timeout (2000 ms >= 2000 ms), closing 
+2026-07-31 13:35:56.791 INFO RTCLOG tcp_echo_server.cpp:37 disconnected: id=1 127.0.0.1:43042 
+2026-07-31 13:35:57.757 INFO RTCLOG TcpServer.cpp:146 TcpServer[echo] stopped 
+2026-07-31 13:35:57.757 INFO RTCLOG tcp_echo_server.cpp:53 bye 

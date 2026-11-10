@@ -23,9 +23,12 @@ void EventLoopThreadPool::start(const EventLoopThread::ThreadInitCallback& cb) {
         char name[64];
         snprintf(name, sizeof name, "%s-loop%d", name_.c_str(), i);
         threads_.emplace_back(new EventLoopThread(cb, name));
+        if (!cpus_.empty()) {
+            threads_.back()->setCpuAffinity(cpus_[static_cast<size_t>(i) % cpus_.size()]);
+        }
         loops_.push_back(threads_.back()->startLoop());
     }
-    if (numThreads_ == 0 && cb) {
+    if (numThreads_ == 0 && cb && baseLoop_) {
         cb(baseLoop_);
     }
 }
@@ -40,7 +43,9 @@ void EventLoopThreadPool::stop() {
 }
 
 EventLoop* EventLoopThreadPool::getNextLoop() {
-    baseLoop_->assertInLoopThread();
+    if (baseLoop_) {
+        baseLoop_->assertInLoopThread();
+    }
     assert(started_);
     EventLoop* loop = baseLoop_;
     if (!loops_.empty()) {
@@ -50,7 +55,7 @@ EventLoop* EventLoopThreadPool::getNextLoop() {
     return loop;
 }
 
-std::vector<EventLoop*> EventLoopThreadPool::getAllLoops() {
+std::vector<EventLoop*> EventLoopThreadPool::getAllLoops() const {
     if (loops_.empty()) {
         return {baseLoop_};
     }

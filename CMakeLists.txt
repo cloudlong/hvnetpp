@@ -18,7 +18,6 @@ set(HVNETPP_SOURCES
     src/Acceptor.cpp
     src/Buffer.cpp
     src/Channel.cpp
-    src/CircularBuffer.cpp
     src/Connector.cpp
     src/EventLoop.cpp
     src/EventLoopThread.cpp
@@ -29,7 +28,6 @@ set(HVNETPP_SOURCES
     src/SocketsOps.cpp
     src/TcpClient.cpp
     src/TcpServer.cpp
-    src/Timer.cpp
     src/TimerQueue.cpp
     src/UdpClient.cpp
     src/UdpServer.cpp

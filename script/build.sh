@@ -8,13 +8,15 @@
 #       --no-examples    不编译 examples/
 #       --ubsan          UBSan trap 模式 + _GLIBCXX_ASSERTIONS（无需 libubsan 运行时）
 #       --asan           AddressSanitizer + UBSan（需要系统装有 libasan）
-#       --test           构建后运行 unpack_selftest 回归测试
+#       --tsan           ThreadSanitizer（需要 libtsan；不能与 --asan 同用）
+#       --test           构建后运行全部自测（unpack/loop/net_selftest）
 #   -h, --help           显示本帮助
 #
 # 示例:
 #   ./script/build.sh                     # Release 构建
 #   ./script/build.sh -t Debug --test     # Debug 构建并跑自测
 #   ./script/build.sh -c --asan           # 干净重建 ASan 版本
+#   ./script/build.sh --tsan --test       # TSan 版本并跑自测（并发改动必跑）
 
 set -euo pipefail
 
@@ -31,7 +33,7 @@ EXTRA_CXX_FLAGS=""
 SANITIZER=""
 
 usage() {
-    sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 err() {
@@ -55,6 +57,8 @@ while [ $# -gt 0 ]; do
             SANITIZER="ubsan"; shift ;;
         --asan)
             SANITIZER="asan"; shift ;;
+        --tsan)
+            SANITIZER="tsan"; shift ;;
         --test)
             RUN_TEST=1; shift ;;
         -h|--help)
@@ -78,6 +82,10 @@ case "$SANITIZER" in
     asan)
         EXTRA_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
         BUILD_DIR="$PROJECT_ROOT/build-asan"
+        ;;
+    tsan)
+        EXTRA_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
+        BUILD_DIR="$PROJECT_ROOT/build-tsan"
         ;;
 esac
 
@@ -110,6 +118,8 @@ if [ "$RUN_TEST" -eq 1 ]; then
     if [ "$BUILD_EXAMPLES" != "ON" ]; then
         err "--test 需要编译示例（不要与 --no-examples 同用）"
     fi
-    echo "[build.sh] 运行 unpack_selftest ..."
-    "$BUILD_DIR/examples/unpack_selftest"
+    for t in unpack_selftest loop_selftest net_selftest; do
+        echo "[build.sh] 运行 $t ..."
+        "$BUILD_DIR/examples/$t"
+    done
 fi

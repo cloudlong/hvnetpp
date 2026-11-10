@@ -64,6 +64,10 @@ int createNonblockingUdpOrDie(sa_family_t family) {
     return sockfd;
 }
 
+int createNonblockingUdp(sa_family_t family) {
+    return ::socket(family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_UDP);
+}
+
 void bindOrDie(int sockfd, const struct sockaddr* addr) {
     int ret = ::bind(sockfd, addr, sockaddrLength(addr));
     if (ret < 0) {

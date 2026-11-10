@@ -1,43 +1,34 @@
 #pragma once
 
-#include <atomic>
-#include <functional>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 
 namespace hvnetpp {
 
 using Timestamp = std::chrono::steady_clock::time_point;
 using TimerCallback = std::function<void()>;
 
-class Timer {
-public:
-    Timer(TimerCallback cb, Timestamp when, double interval)
-        : callback_(std::move(cb)),
-          expiration_(when),
-          interval_(interval),
-          repeat_(interval > 0.0) {
-    }
+// 定时器条目（TimerQueue 内部使用）。
+// Timer 对象在所属 TimerQueue 的生命周期内只回收复用、从不释放，
+// 因此过期的 TimerId 解引用仍是安全的，再用 sequence 判断是否还是同一个定时器。
+struct Timer {
+    enum State : uint8_t {
+        kFree,      // 在空闲链表中
+        kPending,   // 其他线程创建，尚未进入 loop 线程的堆
+        kActive,    // 在堆中等待到期
+        kRunning,   // 已到期，处于本轮待执行批次中
+    };
 
-    void run() const {
-        callback_();
-    }
-
-    Timestamp expiration() const { return expiration_; }
-    bool repeat() const { return repeat_; }
-    int64_t sequence() const { return sequence_; }
-
-    void restart(Timestamp now);
-
-    static int64_t numCreated() { return s_numCreated_.load(std::memory_order_relaxed); }
-
-private:
-    const TimerCallback callback_;
-    Timestamp expiration_;
-    const double interval_;
-    const bool repeat_;
-    const int64_t sequence_ = s_numCreated_.fetch_add(1, std::memory_order_relaxed) + 1;
-
-    static std::atomic<int64_t> s_numCreated_;
+    TimerCallback callback;
+    Timestamp expiration;
+    std::chrono::nanoseconds interval{0};   // > 0 为周期定时器
+    int64_t sequence = 0;                   // 全局唯一，0 表示空闲
+    size_t heapIndex = 0;
+    State state = kFree;
+    bool cancelled = false;
+    Timer* nextFree = nullptr;
 };
 
 } // namespace hvnetpp

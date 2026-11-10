@@ -22,7 +22,9 @@ public:
     EventLoopThread(const EventLoopThread&) = delete;
     EventLoopThread& operator=(const EventLoopThread&) = delete;
 
-    // 启动线程并阻塞等待 loop 就绪，返回 loop 指针
+    // startLoop() 前调用：把线程绑定到指定 CPU（-1 = 不绑定）
+    void setCpuAffinity(int cpu) { cpu_ = cpu; }
+    // 启动线程并阻塞等待 loop 就绪，返回 loop 指针。线程名取 name 的前 15 字节（pthread 限制）
     EventLoop* startLoop();
     // quit + join；可重复调用
     void stop();
@@ -41,6 +43,7 @@ private:
     std::condition_variable cond_;
     ThreadInitCallback initCallback_;
     std::string name_;
+    int cpu_ = -1;
 };
 
 } // namespace hvnetpp

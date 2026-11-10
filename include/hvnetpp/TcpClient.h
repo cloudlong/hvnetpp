@@ -1,7 +1,6 @@
 #pragma once
 
 #include "hvnetpp/Callbacks.h"
-#include "hvnetpp/EventLoopThread.h"
 #include "hvnetpp/InetAddress.h"
 #include "hvnetpp/SocketChannel.h"
 #include "hvnetpp/TimerId.h"
@@ -17,6 +16,7 @@ namespace hvnetpp {
 
 class Connector;
 class EventLoop;
+class EventLoopThread;
 
 // 断线重连策略（与 libhv reconn_setting_t 对齐）
 struct reconn_setting_t {
@@ -40,10 +40,12 @@ void reconn_setting_reset(reconn_setting_t* reconn);
 //   cli.onMessage    = [](const SocketChannelPtr& ch, Buffer* buf) { ... };
 //   reconn_setting_t reconn; cli.setReconnect(&reconn);
 //   cli.start();
-// 客户端自带一个 loop 线程；连接 fd 每次尝试时新建。
+// 默认自带一个 loop 线程；TcpClient(loop) 则挂到外部 loop 上。连接 fd 每次尝试时新建。
 class TcpClient {
 public:
     explicit TcpClient(std::string name = "TcpClient");
+    // 跑在外部 loop 上（不创建线程，不拥有该 loop）
+    explicit TcpClient(EventLoop* loop, std::string name = "TcpClient");
     ~TcpClient();
 
     TcpClient(const TcpClient&) = delete;
@@ -59,8 +61,9 @@ public:
     void setKeepaliveTimeout(int timeoutMs) { keepaliveTimeoutMs_ = timeoutMs; }
     void setHeartbeat(int intervalMs, std::function<void()> fn);
 
-    void start(bool wait_threads_started = true);
-    // 断开连接、停止重连、join loop 线程。不可在本客户端的回调里调用。
+    int start(bool wait_threads_started = true);   // 成功返回 0
+    // 断开连接、停止重连；自建线程时还会 join 线程（此时不可在本客户端的回调里调用）。
+    // 使用外部 loop 时可以在该 loop 里（包括本客户端的回调中）调用。
     void stop(bool wait_threads_stopped = true);
 
     // 用户回调（start() 前设置）
@@ -86,7 +89,7 @@ private:
     void scheduleReconnect();                      // loop 线程
 
     std::string name_;
-    EventLoopThread loopThread_;
+    std::unique_ptr<EventLoopThread> loopThread_;   // 使用外部 loop 时为空
     EventLoop* loop_ = nullptr;
     std::shared_ptr<Connector> connector_;
     InetAddress remoteAddr_;

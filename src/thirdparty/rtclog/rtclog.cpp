@@ -17,8 +17,15 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <new>
+#include <pthread.h>
 #include <stdarg.h>
+#include <thread>
 
 #undef RTC_DEFAULT_LOG_CATEGORY
 #define RTC_DEFAULT_LOG_CATEGORY "RTCLOG"
@@ -98,6 +105,7 @@ get_default_categories(int level)
 
 // Forward declaration
 void rtclog_set_log(const char *log);
+static void rtclog_refresh_level_mask();
 
 void
 rtclog_configure(const std::string &filename_base, bool console, const std::size_t max_log_file_size,
@@ -252,6 +260,7 @@ rtclog_set_categories(const char *categories)
         }
     }
     el::Loggers::setCategories(new_categories.c_str(), true);
+    rtclog_refresh_level_mask();
 }
 
 void
@@ -330,41 +339,274 @@ static el::Level rtc_level_to_el(enum RtcLogLevel lvl) {
     }
 }
 
+// ----------------------------------------------------------------------
+// 级别检查：原子位图。easylogging 的 VRegistry::allowed 每次都要拿全局锁，
+// 这里只在级别配置变化时（rtclog_set_categories）调用它刷新位图，热路径只读一个原子变量。
+// ----------------------------------------------------------------------
+static std::atomic<uint32_t> g_level_mask(0);
+
+static void rtclog_refresh_level_mask() {
+    uint32_t mask = 0;
+    for (int l = RTC_FATAL; l <= RTC_TRACE; ++l) {
+        if (ELPP->vRegistry()->allowed(rtc_level_to_el(static_cast<RtcLogLevel>(l)), RTC_DEFAULT_LOG_CATEGORY)) {
+            mask |= 1u << l;
+        }
+    }
+    g_level_mask.store(mask, std::memory_order_release);
+}
+
 bool rtclog_is_enabled(enum RtcLogLevel lvl) {
-    return ELPP->vRegistry()->allowed(rtc_level_to_el(lvl), RTC_DEFAULT_LOG_CATEGORY);
+    return ((g_level_mask.load(std::memory_order_relaxed) >> static_cast<unsigned>(lvl)) & 1u) != 0;
+}
+
+// ----------------------------------------------------------------------
+// 异步写盘：调用线程格式化后一次 malloc + 无锁入队（Vyukov MPSC），后台线程负责写文件。
+// ----------------------------------------------------------------------
+namespace {
+
+struct LogRecord {
+    std::atomic<LogRecord*> next;
+    el::Level level;
+    const char* file;    // __FILE__ / __FUNCTION__ 均为静态字符串，可跨线程使用
+    int line;
+    const char* func;
+    char msg[1];         // 变长
+};
+
+LogRecord* newRecord(el::Level level, const char* file, int line, const char* func, const char* msg, size_t len) {
+    void* mem = std::malloc(offsetof(LogRecord, msg) + len + 1);
+    if (!mem) {
+        return nullptr;
+    }
+    LogRecord* r = static_cast<LogRecord*>(mem);
+    new (&r->next) std::atomic<LogRecord*>(nullptr);
+    r->level = level;
+    r->file = file;
+    r->line = line;
+    r->func = func;
+    std::memcpy(r->msg, msg, len);
+    r->msg[len] = '\0';
+    return r;
+}
+
+void writeRecord(el::Level level, const char* file, int line, const char* func, const char* msg) {
+    el::base::Writer(level, el::Color::Default, file, line, func).construct(RTC_DEFAULT_LOG_CATEGORY) << msg;
+}
+
+class AsyncLogger {
+public:
+    static const int64_t kMaxPending = 1000000;   // 积压上限，超过丢弃新日志
+
+    AsyncLogger() : head_(&stub_), tail_(&stub_) {
+        stub_.next.store(nullptr, std::memory_order_relaxed);
+    }
+
+    // 返回 false 表示应退回同步写（后台线程已停止）
+    bool post(LogRecord* r) {
+        if (stopped_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        ensureStarted();
+        if (pending_.fetch_add(1, std::memory_order_relaxed) >= kMaxPending) {
+            pending_.fetch_sub(1, std::memory_order_relaxed);
+            dropped_.fetch_add(1, std::memory_order_relaxed);
+            std::free(r);
+            return true;
+        }
+        push(r);
+        if (!wake_.exchange(true, std::memory_order_acq_rel)) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cond_.notify_one();
+        }
+        return true;
+    }
+
+    // 把已入队的日志全部写出（可在任意线程调用，与后台线程互斥）
+    void drain() {
+        if (forked_.load(std::memory_order_acquire)) {
+            return;   // fork 出的子进程：写盘线程不存在，锁的状态也不可信，放弃队列里的旧日志
+        }
+        std::lock_guard<std::mutex> lock(drainMutex_);
+        while (LogRecord* r = pop()) {
+            writeRecord(r->level, r->file, r->line, r->func, r->msg);
+            std::free(r);
+            pending_.fetch_sub(1, std::memory_order_relaxed);
+        }
+        const int64_t dropped = dropped_.exchange(0, std::memory_order_relaxed);
+        if (dropped > 0) {
+            char buf[128];
+            snprintf(buf, sizeof buf, "rtclog: 异步日志积压超过 %lld 条，丢弃 %lld 条",
+                     static_cast<long long>(kMaxPending), static_cast<long long>(dropped));
+            writeRecord(el::Level::Warning, __FILE__, __LINE__, __FUNCTION__, buf);
+        }
+    }
+
+    void shutdown() {
+        if (forked_.load(std::memory_order_acquire)) {
+            return;   // 子进程里没有写盘线程，不能 join
+        }
+        bool expected = false;
+        if (!stopped_.compare_exchange_strong(expected, true)) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cond_.notify_one();
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+        drain();
+    }
+
+private:
+    static void atExit();
+    static void atForkChild();
+
+    void ensureStarted() {
+        std::call_once(startOnce_, [this] {
+            thread_ = std::thread(&AsyncLogger::run, this);
+            std::atexit(&AsyncLogger::atExit);
+            pthread_atfork(nullptr, nullptr, &AsyncLogger::atForkChild);
+        });
+    }
+
+    void run() {
+        pthread_setname_np(pthread_self(), "rtclog");
+        while (!stopped_.load(std::memory_order_acquire)) {
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cond_.wait_for(lock, std::chrono::milliseconds(200), [this] {
+                    return wake_.load(std::memory_order_acquire) || stopped_.load(std::memory_order_acquire);
+                });
+            }
+            // 先清标志再取：此后入队的生产者会再次通知，不会丢唤醒
+            wake_.exchange(false, std::memory_order_acq_rel);
+            drain();
+        }
+    }
+
+    void push(LogRecord* r) {
+        r->next.store(nullptr, std::memory_order_relaxed);
+        LogRecord* prev = head_.exchange(r, std::memory_order_acq_rel);
+        prev->next.store(r, std::memory_order_release);
+    }
+
+    // 单消费者（由 drainMutex_ 保证）
+    LogRecord* pop() {
+        LogRecord* tail = tail_;
+        LogRecord* next = tail->next.load(std::memory_order_acquire);
+        if (tail == &stub_) {
+            if (!next) return nullptr;
+            tail_ = next;
+            tail = next;
+            next = next->next.load(std::memory_order_acquire);
+        }
+        if (next) {
+            tail_ = next;
+            return tail;
+        }
+        if (tail != head_.load(std::memory_order_acquire)) return nullptr;
+        push(&stub_);
+        next = tail->next.load(std::memory_order_acquire);
+        if (next) {
+            tail_ = next;
+            return tail;
+        }
+        return nullptr;
+    }
+
+    std::atomic<LogRecord*> head_;
+    char pad_[64];
+    LogRecord* tail_;
+    LogRecord stub_;
+    std::atomic<int64_t> pending_{0};
+    std::atomic<int64_t> dropped_{0};
+    std::atomic<bool> wake_{false};
+    std::atomic<bool> stopped_{false};
+    std::atomic<bool> forked_{false};
+    std::mutex mutex_;
+    std::condition_variable cond_;
+    std::mutex drainMutex_;
+    std::once_flag startOnce_;
+    std::thread thread_;
+};
+
+// 故意泄漏：避免静态析构顺序问题（进程退出时由 atexit 回调 shutdown）
+AsyncLogger& asyncLogger() {
+    static AsyncLogger* logger = new AsyncLogger;
+    return *logger;
+}
+
+void AsyncLogger::atExit() {
+    asyncLogger().shutdown();
+}
+
+std::atomic<bool> g_async(getenv("RTC_LOG_SYNC") == NULL || strcmp(getenv("RTC_LOG_SYNC"), "1") != 0);
+
+// 子进程（如 daemon() 发生在首次打日志之后）：写盘线程没有被复制过来，改为同步写
+void AsyncLogger::atForkChild() {
+    AsyncLogger& logger = asyncLogger();
+    logger.forked_.store(true, std::memory_order_release);
+    logger.stopped_.store(true, std::memory_order_release);
+    g_async.store(false, std::memory_order_relaxed);
+}
+
+void emit(el::Level level, const char* file, int line, const char* func, const char* msg, size_t len) {
+    if (level != el::Level::Fatal && g_async.load(std::memory_order_relaxed)) {
+        LogRecord* r = newRecord(level, file, line, func, msg, len);
+        if (r && asyncLogger().post(r)) {
+            return;
+        }
+        std::free(r);
+    } else if (level == el::Level::Fatal) {
+        // FATAL 之后进程通常会 abort：先把积压的日志写出，保证顺序和完整性
+        asyncLogger().drain();
+    }
+    writeRecord(level, file, line, func, msg);
+}
+
+} // namespace
+
+void rtclog_set_async(bool on) {
+    if (!on) {
+        asyncLogger().drain();
+    }
+    g_async.store(on, std::memory_order_relaxed);
+}
+
+void rtclog_flush(void) {
+    asyncLogger().drain();
 }
 
 void rtclog_fmt(const char *filename, int fileline, const char* funcname, enum RtcLogLevel lvl, const char *fmt, ...) {
-    // Note: Enablement check is already done by the macro if used correctly,
-    // but we double check here for direct calls or safety.
-    el::Level el_lvl = rtc_level_to_el(lvl);
-    if (!ELPP->vRegistry()->allowed(el_lvl, RTC_DEFAULT_LOG_CATEGORY)) {
+    if (!rtclog_is_enabled(lvl)) {
         return;
     }
+    el::Level el_lvl = rtc_level_to_el(lvl);
 
     va_list args;
     va_start(args, fmt);
-    
-    // Optimization: Try to use a stack buffer for small messages
+
+    // 小消息用栈缓冲格式化
     char stack_buf[1024];
     va_list args_copy;
     va_copy(args_copy, args);
     int len = vsnprintf(stack_buf, sizeof(stack_buf), fmt, args_copy);
     va_end(args_copy);
-    
+
     if (len < 0) {
         va_end(args);
         return;
     }
 
     if (static_cast<size_t>(len) < sizeof(stack_buf)) {
-        el::base::Writer(el_lvl, el::Color::Default, filename, fileline, funcname).construct(RTC_DEFAULT_LOG_CATEGORY) << stack_buf;
+        emit(el_lvl, filename, fileline, funcname, stack_buf, static_cast<size_t>(len));
     } else {
-        // Fallback to heap allocation for large messages
         std::string message(len, '\0');
         vsnprintf(&message[0], len + 1, fmt, args);
-        el::base::Writer(el_lvl, el::Color::Default, filename, fileline, funcname).construct(RTC_DEFAULT_LOG_CATEGORY) << message;
+        emit(el_lvl, filename, fileline, funcname, message.data(), message.size());
     }
-    
+
     va_end(args);
 }

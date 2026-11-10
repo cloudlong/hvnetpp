@@ -2,3 +2,4 @@ build/
 build-wsl/
 build-ubsan/
 build-asan/
+build-tsan/

@@ -1,7 +1,6 @@
 // UDP 客户端示例：发 N 条消息并打印回包（connected-UDP 模式）
 // 用法: ./udp_client_test [port] [host] [count]
 #include "hvnetpp/UdpClient.h"
-#include "hvnetpp/Buffer.h"
 #include "rtclog.h"
 
 #include <atomic>
@@ -25,9 +24,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     cli.setConnectedUdp(true);
-    cli.onMessage = [&received](const hvnetpp::InetAddress& peer, hvnetpp::Buffer* buf) {
-        std::string msg = buf->retrieveAllAsString();
-        RTCLOG(RTC_INFO, "reply from %s: %s", peer.toIpPort().c_str(), msg.c_str());
+    cli.onMessage = [&received](const hvnetpp::UdpPacket& pkt) {
+        RTCLOG(RTC_INFO, "reply from %s: %.*s", pkt.peer.toIpPort().c_str(), static_cast<int>(pkt.len), pkt.data);
         ++received;
     };
     cli.start();

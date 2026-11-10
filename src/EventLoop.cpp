@@ -4,19 +4,19 @@
 #include "hvnetpp/TimerQueue.h"
 #include "rtclog.h"
 
-#include <algorithm>
 #include <cstdlib>
 #include <signal.h>
 #include <sys/eventfd.h>
-#include <unistd.h>
 #include <sys/syscall.h>
+#include <unistd.h>
 
 using namespace hvnetpp;
 
 namespace {
 __thread EventLoop* t_loopInThisThread = nullptr;
 
-const int kPollTimeMs = 10000;
+const int64_t kPollTimeNs = 10LL * 1000 * 1000 * 1000;   // 无定时器时最长阻塞 10 秒
+const int kMaxTasksPerRound = 1024;   // 每轮最多执行的任务数：多核持续投递时也能及时回到 IO
 
 pid_t gettid_() {
     return static_cast<pid_t>(::syscall(SYS_gettid));
@@ -45,7 +45,7 @@ EventLoop::EventLoop()
     : looping_(false),
       quit_(false),
       eventHandling_(false),
-      callingPendingFunctors_(false),
+      rerunPending_(false),
       threadId_(std::this_thread::get_id()),
       tid_(gettid_()),
       poller_(new Poller(this)),
@@ -53,8 +53,7 @@ EventLoop::EventLoop()
       wakeupFd_(createEventfd()),
       wakeupChannel_(new Channel(this, wakeupFd_)),
       currentActiveChannel_(nullptr),
-      pendingQueue_(new PendingQueue(16))
-{
+      wakeupPending_(false) {
     RTCLOG(RTC_DEBUG, "EventLoop created %p in thread %d", this, tid_);
     if (t_loopInThisThread) {
         RTCLOG(RTC_FATAL, "Another EventLoop %p exists in this thread %d", t_loopInThisThread, tid_);
@@ -62,19 +61,27 @@ EventLoop::EventLoop()
     } else {
         t_loopInThisThread = this;
     }
-    if (!pendingQueue_->isValid()) {
-        RTCLOG(RTC_WARN, "EventLoop pending MPSC queue unavailable, falling back to mutex queue");
-    }
     wakeupChannel_->setReadCallback(std::bind(&EventLoop::handleRead, this));
     wakeupChannel_->enableReading();
 }
 
 EventLoop::~EventLoop() {
     RTCLOG(RTC_DEBUG, "EventLoop %p of thread %d destructs in thread %d", this, tid_, gettid_());
+    // 先销毁定时器：回调捕获对象的析构可能再投递任务（reset 期间 timerQueue_ 已为空，runAt 等会直接忽略）
+    timerQueue_.reset();
+    // 丢弃未执行的任务：只析构、不执行。析构过程中可能再投递，循环到空为止
+    while (MpscNode* node = pendingQueue_.pop()) {
+        Task* task = static_cast<Task*>(node);
+        task->invoke(task, false);
+    }
     wakeupChannel_->disableAll();
     wakeupChannel_->remove();
     ::close(wakeupFd_);
     t_loopInThisThread = nullptr;
+}
+
+EventLoop* EventLoop::getEventLoopOfCurrentThread() {
+    return t_loopInThisThread;
 }
 
 void EventLoop::loop() {
@@ -82,16 +89,22 @@ void EventLoop::loop() {
     looping_ = true;
     RTCLOG(RTC_TRACE, "EventLoop %p start looping", this);
 
-    while (!quit_) {
+    while (!quit_.load(std::memory_order_acquire)) {
         activeChannels_.clear();
-        poller_->poll(kPollTimeMs, &activeChannels_);
-        
+        int64_t timeoutNs = 0;
+        if (!rerunPending_) {
+            timeoutNs = timerQueue_->nextTimeoutNs(std::chrono::steady_clock::now(), kPollTimeNs);
+        }
+        rerunPending_ = false;
+        poller_->poll(timeoutNs, &activeChannels_);
+
         eventHandling_ = true;
         for (Channel* channel : activeChannels_) {
             currentActiveChannel_ = channel;
             channel->handleEvent();
         }
         currentActiveChannel_ = nullptr;
+        timerQueue_->processExpired(std::chrono::steady_clock::now());
         eventHandling_ = false;
 
         doPendingFunctors();
@@ -102,17 +115,59 @@ void EventLoop::loop() {
 }
 
 void EventLoop::quit() {
-    quit_ = true;
+    quit_.store(true, std::memory_order_release);
     if (!isInLoopThread()) {
         wakeup();
     }
 }
 
-void EventLoop::runInLoop(Functor cb) {
+void EventLoop::enqueue(Task* task) {
+    pendingQueue_.push(task);
     if (isInLoopThread()) {
-        cb();
-    } else {
-        queueInLoop(std::move(cb));
+        // IO/定时器回调阶段投递的任务会在本轮 doPendingFunctors 执行，无需唤醒；
+        // 其余情况（任务里再投递、loop() 启动前投递）只需让下一次 poll 不阻塞
+        if (!eventHandling_) {
+            rerunPending_ = true;
+        }
+        return;
+    }
+    // 唤醒合并：只有 false -> true 的那个生产者写 eventfd。
+    // 消费者在取任务之前把标志清回 false，因此清零之后才完成 push 的生产者必然会再写一次，不会丢唤醒。
+    if (!wakeupPending_.exchange(true, std::memory_order_acq_rel)) {
+        wakeup();
+    }
+}
+
+void EventLoop::doPendingFunctors() {
+    wakeupPending_.exchange(false, std::memory_order_acq_rel);
+
+    // 先摘下最多 kMaxTasksPerRound 个任务串成本地链表（复用节点的 mpscNext，不分配内存）再执行：
+    // 执行期间新投递的任务留到下一轮；摘取期间生产者仍在不断投递时也有上限，不会饿死 IO
+    MpscNode* first = nullptr;
+    MpscNode* last = nullptr;
+    int taken = 0;
+    while (taken < kMaxTasksPerRound) {
+        MpscNode* node = pendingQueue_.pop();
+        if (node == nullptr) {
+            break;
+        }
+        ++taken;
+        node->mpscNext.store(nullptr, std::memory_order_relaxed);
+        if (last) {
+            last->mpscNext.store(node, std::memory_order_relaxed);
+        } else {
+            first = node;
+        }
+        last = node;
+    }
+    if (taken == kMaxTasksPerRound) {
+        rerunPending_ = true;   // 可能还有剩余任务，下一次 poll 不阻塞
+    }
+    for (MpscNode* node = first; node != nullptr;) {
+        MpscNode* next = node->mpscNext.load(std::memory_order_relaxed);
+        Task* task = static_cast<Task*>(node);
+        task->invoke(task, true);   // 执行后释放 node
+        node = next;
     }
 }
 
@@ -154,78 +209,34 @@ void EventLoop::handleRead() {
     }
 }
 
-void EventLoop::doPendingFunctors() {
-    callingPendingFunctors_ = true;
-
-    if (pendingQueue_->isValid()) {
-        while (true) {
-            PendingQueue::Node* node = pendingQueue_->peek();
-            if (!node) {
-                break;
-            }
-
-            FunctorTask& task = node->data;
-            if (task.functorPtr) {
-                (*task.functorPtr)();
-                delete task.functorPtr;
-            }
-
-            pendingQueue_->consume(node);
-        }
-    }
-
-    std::vector<Functor> pendingFunctors;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        pendingFunctors.swap(pendingFunctors_);
-    }
-    for (Functor& functor : pendingFunctors) {
-        functor();
-    }
-
-    callingPendingFunctors_ = false;
-}
-
 TimerId EventLoop::runAt(Timestamp time, TimerCallback cb) {
-    return timerQueue_->addTimer(std::move(cb), time, 0.0);
+    if (!timerQueue_) {
+        return TimerId();   // 正在析构
+    }
+    return timerQueue_->addTimer(std::move(cb), time, std::chrono::nanoseconds(0));
 }
 
-TimerId EventLoop::runAfter(double delay, TimerCallback cb) {
-    Timestamp time(std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<int64_t>(delay * 1000)));
-    return runAt(time, std::move(cb));
+TimerId EventLoop::runAfter(double delaySeconds, TimerCallback cb) {
+    return runAfter(std::chrono::duration<double>(delaySeconds), std::move(cb));
 }
 
-TimerId EventLoop::runEvery(double interval, TimerCallback cb) {
-    Timestamp time(std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<int64_t>(interval * 1000)));
-    return timerQueue_->addTimer(std::move(cb), time, interval);
+TimerId EventLoop::runEvery(double intervalSeconds, TimerCallback cb) {
+    return runEvery(std::chrono::duration<double>(intervalSeconds), std::move(cb));
+}
+
+TimerId EventLoop::runEveryNs(std::chrono::nanoseconds interval, TimerCallback cb) {
+    if (!timerQueue_) {
+        return TimerId();
+    }
+    if (interval.count() <= 0) {
+        // 周期 <= 0 退化为立即执行一次（与旧实现一致）
+        return timerQueue_->addTimer(std::move(cb), std::chrono::steady_clock::now(), std::chrono::nanoseconds(0));
+    }
+    return timerQueue_->addTimer(std::move(cb), std::chrono::steady_clock::now() + interval, interval);
 }
 
 void EventLoop::cancel(TimerId timerId) {
-    return timerQueue_->cancel(timerId);
-}
-
-void EventLoop::queueInLoop(Functor cb) {
-    PendingQueue::Node* node = nullptr;
-    std::unique_ptr<Functor> functor;
-    if (pendingQueue_->isValid()) {
-        functor.reset(new Functor(std::move(cb)));
-        node = pendingQueue_->reserve();
-    }
-
-    if (node) {
-        node->data.functorPtr = functor.release();
-        pendingQueue_->commit(node, 1);
-    } else {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (functor) {
-            pendingFunctors_.emplace_back(std::move(*functor));
-        } else {
-            pendingFunctors_.emplace_back(std::move(cb));
-        }
-        RTCLOG(RTC_WARN, "queueInLoop lock-free queue unavailable/full, using fallback queue");
-    }
-
-    if (!isInLoopThread() || callingPendingFunctors_) {
-        wakeup();
+    if (timerQueue_) {
+        timerQueue_->cancel(timerId);
     }
 }

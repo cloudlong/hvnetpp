@@ -8,6 +8,7 @@ namespace sockets {
 
 int createNonblockingOrDie(sa_family_t family);
 int createNonblockingUdpOrDie(sa_family_t family);
+int createNonblockingUdp(sa_family_t family);   // 失败返回 -1（errno 保留），不 abort
 int connect(int sockfd, const struct sockaddr* addr);
 void bindOrDie(int sockfd, const struct sockaddr* addr);
 void listenOrDie(int sockfd);

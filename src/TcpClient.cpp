@@ -1,13 +1,13 @@
 #include "hvnetpp/TcpClient.h"
 #include "Connector.h"
 #include "hvnetpp/EventLoop.h"
+#include "hvnetpp/EventLoopThread.h"
 #include "hvnetpp/SocketsOps.h"
 #include "rtclog.h"
 
 #include <arpa/inet.h>
 #include <assert.h>
 #include <cstring>
-#include <future>
 
 namespace hvnetpp {
 
@@ -39,7 +39,12 @@ void reconn_setting_reset(reconn_setting_t* reconn) {
 
 TcpClient::TcpClient(std::string name)
     : name_(std::move(name)),
-      loopThread_(EventLoopThread::ThreadInitCallback(), name_ + "-loop") {
+      loopThread_(new EventLoopThread(EventLoopThread::ThreadInitCallback(), name_ + "-loop")) {
+}
+
+TcpClient::TcpClient(EventLoop* loop, std::string name)
+    : name_(std::move(name)),
+      loop_(loop) {
 }
 
 TcpClient::~TcpClient() {
@@ -94,20 +99,23 @@ void TcpClient::setHeartbeat(int intervalMs, std::function<void()> fn) {
     heartbeatFn_ = std::move(fn);
 }
 
-void TcpClient::start(bool wait_threads_started) {
+int TcpClient::start(bool wait_threads_started) {
     if (!hasRemoteAddr_) {
         RTCLOG(RTC_ERROR, "TcpClient[%s] start without createsocket", name_.c_str());
-        return;
+        return -1;
     }
     bool expected = false;
     if (!started_.compare_exchange_strong(expected, true)) {
-        return;
+        return 0;
     }
 
-    loop_ = loopThread_.startLoop();
-
-    std::promise<void> ready;
-    loop_->runInLoop([this, &ready] {
+    if (loopThread_) {
+        loop_ = loopThread_->startLoop();
+    }
+    auto setup = [this] {
+        if (!started_.load(std::memory_order_acquire)) {
+            return;   // start(false) 之后、本任务执行之前已在 loop 线程内 stop()
+        }
         connector_ = std::make_shared<Connector>(loop_, remoteAddr_);
         connector_->setConnectTimeout(connectTimeoutMs_);
         connector_->setNewConnectionCallback(
@@ -115,11 +123,13 @@ void TcpClient::start(bool wait_threads_started) {
         connector_->setConnectFailedCallback(
             std::bind(&TcpClient::onConnectorFail, this));
         connector_->startConnect();
-        ready.set_value();
-    });
+    };
     if (wait_threads_started) {
-        ready.get_future().wait();
+        loop_->runInLoopAndWait(setup);
+    } else {
+        loop_->runInLoop(setup);   // 旧实现在这里把局部 promise 的引用交给 loop 线程，返回后悬空
     }
+    return 0;
 }
 
 void TcpClient::stop(bool wait_threads_stopped) {
@@ -128,10 +138,9 @@ void TcpClient::stop(bool wait_threads_stopped) {
     if (!started_.compare_exchange_strong(expected, false)) {
         return;
     }
-    assert(loop_ != nullptr && !loop_->isInLoopThread());
+    assert(!(loopThread_ && loop_->isInLoopThread()) && "TcpClient::stop() 不可在本客户端的回调里调用");
 
-    std::promise<void> done;
-    loop_->runInLoop([this, &done] {
+    const bool ran = loop_->runInLoopAndWait([this] {
         if (hasReconnectTimer_) {
             loop_->cancel(reconnectTimer_);
             hasReconnectTimer_ = false;
@@ -147,13 +156,24 @@ void TcpClient::stop(bool wait_threads_stopped) {
         if (channel) {
             channel->forceCloseInLoop();
         }
-        connector_.reset();
-        done.set_value();
+        // 外部 loop 模式下 stop() 可能就在 Connector 的回调链里（onConnection / onConnectFailed），延迟到下一轮再析构
+        std::shared_ptr<Connector> connector = std::move(connector_);
+        if (connector) {
+            loop_->queueInLoop([connector] {});
+        }
     });
-    done.get_future().wait();
+    if (!ran) {
+        // loop 已退出：连接对象绑定在已退出的 loop 上，不能在本线程注销，只能放弃
+        RTCLOG(RTC_ERROR, "TcpClient[%s] 所在 loop 已退出，请先 stop() 客户端再停止外部 loop", name_.c_str());
+        static_cast<void>(new std::shared_ptr<Connector>(std::move(connector_)));   // 有意泄漏
+        std::lock_guard<std::mutex> lock(channelMutex_);
+        static_cast<void>(new SocketChannelPtr(std::move(channel_)));               // 有意泄漏
+    }
 
-    loopThread_.stop();
-    loop_ = nullptr;
+    if (loopThread_) {
+        loopThread_->stop();
+        loop_ = nullptr;
+    }
     RTCLOG(RTC_INFO, "TcpClient[%s] stopped", name_.c_str());
 }
 

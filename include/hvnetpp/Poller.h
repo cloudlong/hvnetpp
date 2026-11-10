@@ -1,7 +1,8 @@
 #pragma once
 
-#include <vector>
+#include <cstdint>
 #include <map>
+#include <vector>
 
 struct epoll_event;
 
@@ -17,7 +18,8 @@ public:
     Poller(EventLoop* loop);
     ~Poller();
 
-    void poll(int timeoutMs, ChannelList* activeChannels);
+    // timeoutNs: 0 = 不阻塞；精度为纳秒（内核支持 epoll_pwait2 时），否则向上取整到毫秒
+    void poll(int64_t timeoutNs, ChannelList* activeChannels);
     void updateChannel(Channel* channel);
     void removeChannel(Channel* channel);
 

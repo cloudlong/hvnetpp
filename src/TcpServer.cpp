@@ -1,6 +1,7 @@
 #include "hvnetpp/TcpServer.h"
 #include "Acceptor.h"
 #include "hvnetpp/EventLoop.h"
+#include "hvnetpp/EventLoopThread.h"
 #include "hvnetpp/EventLoopThreadPool.h"
 #include "hvnetpp/SocketsOps.h"
 #include "rtclog.h"
@@ -8,7 +9,6 @@
 #include <assert.h>
 #include <cerrno>
 #include <cstring>
-#include <future>
 #include <string.h>
 #include <unistd.h>
 #include <vector>
@@ -17,7 +17,12 @@ namespace hvnetpp {
 
 TcpServer::TcpServer(std::string name)
     : name_(std::move(name)),
-      acceptorThread_(EventLoopThread::ThreadInitCallback(), name_ + "-acceptor") {
+      acceptorThread_(new EventLoopThread(EventLoopThread::ThreadInitCallback(), name_ + "-accept")) {
+}
+
+TcpServer::TcpServer(EventLoop* loop, std::string name)
+    : name_(std::move(name)),
+      acceptorLoop_(loop) {
 }
 
 TcpServer::~TcpServer() {
@@ -36,7 +41,10 @@ int TcpServer::createsocket(int port, const char* host) {
     listenAddr_ = InetAddress(host ? host : "0.0.0.0", static_cast<uint16_t>(port), ipv6);
     int fd = sockets::createNonblockingOrDie(listenAddr_.family());
     sockets::setReuseAddr(fd, true);
-    sockets::setReusePort(fd, true);
+    if (reusePort_) {
+        // 默认不开：否则误起第二个进程也能 bind 成功，连接被内核分给两个进程，极难排查
+        sockets::setReusePort(fd, true);
+    }
     socklen_t addrlen = ipv6 ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
     if (::bind(fd, listenAddr_.getSockAddr(), addrlen) < 0) {
         RTCLOG(RTC_ERROR, "TcpServer[%s] bind %s failed: %s",
@@ -64,34 +72,54 @@ void TcpServer::setUnpack(const unpack_setting_t* setting) {
     }
 }
 
-void TcpServer::start(bool wait_threads_started) {
+int TcpServer::start(bool wait_threads_started) {
     (void)wait_threads_started; // 线程启动本身就是同步等待的，参数为对齐 libhv API 保留
     if (listenfd_ < 0) {
         RTCLOG(RTC_ERROR, "TcpServer[%s] start without createsocket", name_.c_str());
-        return;
+        return -1;
     }
     bool expected = false;
     if (!started_.compare_exchange_strong(expected, true)) {
-        return;
+        return 0;
     }
 
-    acceptorLoop_ = acceptorThread_.startLoop();
-    workerPool_.reset(new EventLoopThreadPool(acceptorLoop_, name_));
-    workerPool_->setThreadNum(threadNum_);
-
-    std::promise<void> started;
-    acceptorLoop_->runInLoop([this, &started] {
-        workerPool_->start();
+    if (acceptorThread_) {
+        acceptorLoop_ = acceptorThread_->startLoop();
+    }
+    acceptorLoop_->runInLoopAndWait([this] {
+        if (externalPool_) {
+            ioLoops_ = externalPool_->getAllLoops();
+        } else {
+            workerPool_.reset(new EventLoopThreadPool(acceptorLoop_, name_));
+            workerPool_->setThreadNum(threadNum_);
+            workerPool_->start();
+            ioLoops_ = workerPool_->getAllLoops();
+        }
+        nextLoop_ = 0;
         acceptor_ = std::make_shared<Acceptor>(acceptorLoop_, listenfd_);
         acceptor_->tieChannel();
         acceptor_->setNewConnectionCallback(
             std::bind(&TcpServer::newConnection, this, std::placeholders::_1, std::placeholders::_2));
         acceptor_->listen();
-        started.set_value();
     });
-    started.get_future().wait();
-    RTCLOG(RTC_INFO, "TcpServer[%s] listening on %s with %d worker thread(s)",
-           name_.c_str(), listenAddr_.toIpPort().c_str(), threadNum_);
+    RTCLOG(RTC_INFO, "TcpServer[%s] listening on %s with %zu io loop(s)",
+           name_.c_str(), listenAddr_.toIpPort().c_str(), ioLoops_.size());
+    return 0;
+}
+
+bool TcpServer::inOwnThread() const {
+    if (acceptorThread_ && acceptorLoop_ && acceptorLoop_->isInLoopThread()) {
+        return true;
+    }
+    if (workerPool_) {
+        EventLoop* current = EventLoop::getEventLoopOfCurrentThread();
+        for (EventLoop* l : ioLoops_) {
+            if (l == current && l != acceptorLoop_) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 void TcpServer::stop(bool wait_threads_stopped) {
@@ -100,19 +128,16 @@ void TcpServer::stop(bool wait_threads_stopped) {
     if (!started_.compare_exchange_strong(expected, false)) {
         return;
     }
-    // 禁止在本服务器的回调（即自有 loop 线程）里调用 stop，否则下面的同步等待会死锁
-    assert(!acceptorLoop_->isInLoopThread());
+    // 自建线程里调用会在同步等待 / join 自己时死锁
+    assert(!inOwnThread() && "TcpServer::stop() 不可在本服务器的回调里调用");
 
     // 1. 停止接受新连接
-    {
-        std::promise<void> done;
-        acceptorLoop_->runInLoop([this, &done] {
-            acceptor_.reset();
-            done.set_value();
-        });
-        done.get_future().wait();
-        listenfd_ = -1; // fd 已随 Acceptor 关闭
+    if (!acceptorLoop_->runInLoopAndWait([this] { acceptor_.reset(); })) {
+        // accept loop 已退出：Acceptor 的 Channel 绑定在该 loop 上，不能在本线程注销，只能放弃
+        RTCLOG(RTC_ERROR, "TcpServer[%s] accept loop 已退出，请先 stop() 服务器再停止外部 loop", name_.c_str());
+        static_cast<void>(new std::shared_ptr<Acceptor>(std::move(acceptor_)));   // 有意泄漏
     }
+    listenfd_ = -1; // fd 已随 Acceptor 关闭
 
     // 2. 强制关闭全部连接（在各自 loop 内一步完成 close + destroy）
     std::vector<SocketChannelPtr> channels;
@@ -128,21 +153,21 @@ void TcpServer::stop(bool wait_threads_stopped) {
     }
     channels.clear();
 
-    // 3. 栅栏：确保上面的关闭任务都已执行完
-    std::vector<std::future<void>> barriers;
-    for (EventLoop* loop : workerPool_->getAllLoops()) {
-        auto p = std::make_shared<std::promise<void>>();
-        barriers.push_back(p->get_future());
-        loop->queueInLoop([p] { p->set_value(); });
+    // 3. 栅栏：同一线程投递的任务按序执行，等到它就说明上面的关闭任务都已完成
+    for (EventLoop* loop : ioLoops_) {
+        loop->runInLoopAndWait([] {});
     }
-    for (auto& f : barriers) {
-        f.wait();
-    }
+    ioLoops_.clear();
 
-    // 4/5. 停 worker 线程与 accept 线程
-    workerPool_->stop();
-    acceptorThread_.stop();
-    acceptorLoop_ = nullptr;
+    // 4/5. 停自建的 worker 线程与 accept 线程（外部提供的不动）
+    if (workerPool_) {
+        workerPool_->stop();
+        workerPool_.reset();
+    }
+    if (acceptorThread_) {
+        acceptorThread_->stop();
+        acceptorLoop_ = nullptr;
+    }
     RTCLOG(RTC_INFO, "TcpServer[%s] stopped", name_.c_str());
 }
 
@@ -157,7 +182,8 @@ void TcpServer::newConnection(int sockfd, const InetAddress& peerAddr) {
         return;
     }
 
-    EventLoop* ioLoop = workerPool_->getNextLoop();
+    EventLoop* ioLoop = ioLoops_[nextLoop_];
+    nextLoop_ = (nextLoop_ + 1) % ioLoops_.size();
     InetAddress localAddr(sockets::getLocalAddr(sockfd));
     SocketChannelPtr channel = std::make_shared<SocketChannel>(ioLoop, sockfd, localAddr, peerAddr);
     if (unpack_) {

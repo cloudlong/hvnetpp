@@ -6,7 +6,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <assert.h>
+#include <atomic>
 #include <cerrno>
+#include <sys/syscall.h>
+#include <time.h>
 
 namespace hvnetpp {
 
@@ -24,21 +27,42 @@ Poller::~Poller() {
     ::close(epollfd_);
 }
 
-void Poller::poll(int timeoutMs, ChannelList* activeChannels) {
-    int numEvents = ::epoll_wait(epollfd_, &*events_.begin(), static_cast<int>(events_.size()), timeoutMs);
+namespace {
+
+// epoll_pwait2（Linux 5.11+）支持纳秒超时；旧内核或被 seccomp 拦截时永久退回 epoll_wait
+#if defined(SYS_epoll_pwait2) && __SIZEOF_LONG__ == 8
+std::atomic<bool> s_usePwait2{true};
+#endif
+
+int waitEvents(int epfd, struct epoll_event* events, int maxEvents, int64_t timeoutNs) {
+#if defined(SYS_epoll_pwait2) && __SIZEOF_LONG__ == 8
+    if (timeoutNs > 0 && s_usePwait2.load(std::memory_order_relaxed)) {
+        struct timespec ts;
+        ts.tv_sec = static_cast<time_t>(timeoutNs / 1000000000);
+        ts.tv_nsec = static_cast<long>(timeoutNs % 1000000000);
+        int n = static_cast<int>(::syscall(SYS_epoll_pwait2, epfd, events, maxEvents, &ts, nullptr, 0));
+        if (n >= 0 || (errno != ENOSYS && errno != EPERM)) {
+            return n;
+        }
+        s_usePwait2.store(false, std::memory_order_relaxed);
+    }
+#endif
+    int timeoutMs = static_cast<int>((timeoutNs + 999999) / 1000000);   // 向上取整，定时器不会提前触发
+    return ::epoll_wait(epfd, events, maxEvents, timeoutMs);
+}
+
+} // namespace
+
+void Poller::poll(int64_t timeoutNs, ChannelList* activeChannels) {
+    int numEvents = waitEvents(epollfd_, &*events_.begin(), static_cast<int>(events_.size()), timeoutNs);
     int savedErrno = errno;
     if (numEvents > 0) {
         fillActiveChannels(numEvents, activeChannels);
         if (static_cast<size_t>(numEvents) == events_.size()) {
             events_.resize(events_.size() * 2);
         }
-    } else if (numEvents == 0) {
-        // nothing happened
-    } else {
-        if (savedErrno != EINTR) {
-            errno = savedErrno;
-            RTCLOG(RTC_ERROR, "Poller::poll() error: %s", strerror(savedErrno));
-        }
+    } else if (numEvents < 0 && savedErrno != EINTR) {
+        RTCLOG(RTC_ERROR, "Poller::poll() error: %s", strerror(savedErrno));
     }
 }
 
